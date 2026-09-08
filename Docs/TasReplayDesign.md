@@ -104,14 +104,17 @@ took. Record on a 120 Hz flagship, replay on a 30 Hz budget phone, and every bal
 jump apex and slide distance is different — the tape "works" and the run is 0.4 s slower.
 `Delta` is constant by definition (`1/tickRate`), so the same tape is the same run.
 
-Two modes, deliberately:
+Three cadences, deliberately (`TasClockMode`):
 * **Mode A — `auto`**: engine keeps running its own `FixedUpdate`, we only swap the input
   source and pin `Time.fixedDeltaTime = 1/tickRate`. Zero changes to your movement code beyond
   the `Delta` substitution. Use it for in-game realtime replay + recording.
-* **Mode B — `manual`**: `Time.timeScale = 0` + `Physics.simulationMode = Manual`
-  (`Physics.autoSimulation = false` pre-2022.2) and *we* call `Physics.Simulate(dt)` per tick.
-  This is what buys frame-advance, slow-mo, turbo, rollback and headless verification. `0.5x`
-  and `4x` are only meaningful when the clock, not the renderer, decides how many ticks elapse.
+* **`Hold`**: the engine still runs, but the clock decides per render frame whether a tick is
+  allowed, and undoes a non-tick frame by restoring the newest savestate in `LateUpdate`. That is
+  slow-mo, pause and frame-advance with no patches and no `timeScale` games.
+* **`Manual`** (Mode B): `Time.timeScale = 0` + `Physics.simulationMode = Manual`
+  (`Physics.autoSimulation = false` pre-2022.2) and *we* call `Physics.Simulate(dt)` per tick, with
+  sim scripts driven by the tick bus (`TasSimBehaviour`, or `TasTickDriver` for scripts you won't
+  edit). This is the only mode that can do >1x turbo and headless verification.
 
 ### 3.2 One input seam (`TasInput`)
 Every read of player input in the game must come from one place. That place has two providers:
@@ -273,8 +276,18 @@ is covered by checkpoint correction, which is why the checkpoints stay.
 
 ## 8. Files in this branch
 
+Runtime behaviour of the tool itself (savestates / slow-mo / auto-record / replay toggle /
+branch splicing) is documented in [`TasToolPcGuide.md`](TasToolPcGuide.md).
+
 ```
-Tas/Runtime/TasClock.cs        fixed tick clock, Mode A/B, sim bus, TasSimBehaviour
+Tas/Runtime/TasClock.cs        tick clock, 3 cadences (Auto/Hold/Manual), sim bus, TasSimBehaviour
+Tas/Runtime/TasTool.cs         the tool: auto-record start/stop, replay toggle, hotkeys, rollback+splice
+Tas/Runtime/TasToolConfig.cs   persisted settings (toggles, tickRate, speed, slots, keys)
+Tas/Runtime/TasSavestates.cs   per-tick snapshot ring (zero alloc) + 10 disk slots + visual reset
+Tas/Runtime/TasBranch.cs       discarded attempts: cut / list / splice back into the trunk
+Tas/Runtime/TasTickDriver.cs   drives uncooperative sim scripts in Manual mode
+Tas/Runtime/TasToolUI.cs       the in-build panel (IMGUI): toggles, transport, slots, branches
+Tas/Runtime/TasLiveInput.cs    PC keyboard/mouse reader with injectable Move/Look readers
 Tas/Runtime/TasClockTail.cs    runs the tick tail at +32000 so capture happens after the sim
 Tas/Runtime/TasInput.cs        TasInput façade + TasLiveInput (⚠ adapt axis/button names)
 Tas/Runtime/TasInputFrame.cs   the 24-byte record, fixed-point, edges derived
@@ -286,7 +299,7 @@ Tas/Runtime/TasRecorder.cs     drop-in DemoRecorder replacement, same gates & AP
 Tas/Runtime/TasPlayback.cs     SpectateState / ResimLive / ResimVerify + correction
 Tas/Runtime/TasSnapshot.cs     savestates, keyframes, sidecar persistence
 Tas/Runtime/TasDemoExport.cs   DemoData-compatible JSON, gzip wire format, upload payload
-Tas/Runtime/TasOverlay.cs      input display, tick clock, desync readout, F9/F10/F11 hotkeys
+Tas/Runtime/TasOverlay.cs      HUD: tick clock, input display, desync readout (keys live in TasTool)
 Tas/Editor/TasToolWindow.cs    Window ▸ TAS Tool: transport, input grid editor, verify, export
 ```
 `Tas/Runtime` and `Tas/Editor` are separate asmdefs so `UnityEditor` never reaches a player

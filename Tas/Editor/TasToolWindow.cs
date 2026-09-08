@@ -51,6 +51,34 @@ public sealed class TasToolWindow : EditorWindow
             if (GUILayout.Button("Save As")) SaveAsPanel();
         }
         EditorGUILayout.LabelField("File", path == null ? "-" : Path.GetFileName(path));
+        if (TasTool.i != null)
+        {
+            EditorGUILayout.LabelField("Tool session", TasTool.i.DebugLine);
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                if (GUILayout.Button("Play now")) TasTool.i.PlayNow(jumpTick);
+                if (GUILayout.Button("Stop")) TasTool.i.StopTransport();
+                if (GUILayout.Button("Rollback -1s")) TasTool.i.RollbackTicks(Mathf.Max(1, TasTool.i.cfg.tickRate));
+                if (GUILayout.Button("Slot 1 save")) TasTool.i.SaveSlot(0);
+                if (GUILayout.Button("Slot 1 load")) TasTool.i.LoadSlot(0);
+            }
+            if (TasTool.i.branches.Count > 0)
+            {
+                EditorGUILayout.LabelField("Branches (" + TasTool.i.branches.Count + ")", EditorStyles.boldLabel);
+                var bs = TasTool.i.branches.Branches;
+                for (int k = bs.Count - 1; k >= 0 && k >= bs.Count - 8; k--)
+                {
+                    TasBranch b = bs[k];
+                    using (new EditorGUILayout.HorizontalScope())
+                    {
+                        EditorGUILayout.LabelField("#" + b.id + " " + b.label + " @" + b.parentTick +
+                                                   " " + b.frameCount + "t " + b.durationSeconds.ToString("0.000") + "s");
+                        if (GUILayout.Button("splice", GUILayout.Width(52))) TasTool.i.branches.Splice(b.id);
+                        if (GUILayout.Button("x", GUILayout.Width(20))) TasTool.i.branches.Drop(b.id);
+                    }
+                }
+            }
+        }
         if (tape != null)
             EditorGUILayout.LabelField("Header", tape.Summary());
 

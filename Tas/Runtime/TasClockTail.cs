@@ -24,7 +24,10 @@ namespace Tas
         void FixedUpdate()
         {
             TasClock c = TasClock.i;
-            if (c == null || c.manual || c.paused) return;
+            if (c == null) return;
+            if (c.mode == TasClockMode.Manual) return;   // Step() calls Tail() itself
+            if (!c.tailDue) return;                      // held/paused frame: no tick, so no tail
+            c.tailDue = false;
             c.Tail();
         }
     }

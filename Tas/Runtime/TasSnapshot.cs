@@ -66,8 +66,34 @@ namespace Tas
         public static byte[] Capture()
         {
             using (MemoryStream ms = new MemoryStream(1024))
-            using (BinaryWriter w = new BinaryWriter(ms))
             {
+                using (BinaryWriter w = new BinaryWriter(ms)) WritePayload(w);
+                return ms.ToArray();
+            }
+        }
+
+        /// <summary>
+        /// Zero-allocation variant for the per-tick ring: writes into a caller-owned fixed buffer
+        /// and returns the byte count, or -1 if the state does not fit (raising Stride is the fix;
+        /// silently truncating a savestate is not, that is how you get "sometimes rollback corrupts").
+        /// </summary>
+        public static int CaptureInto(byte[] buf)
+        {
+            if (buf == null) return -1;
+            try
+            {
+                using (MemoryStream ms = new MemoryStream(buf, 0, buf.Length, true, false))
+                {
+                    using (BinaryWriter w = new BinaryWriter(ms)) WritePayload(w);
+                    return (int)ms.Position;
+                }
+            }
+            catch (IOException) { return -1; }
+            catch (NotSupportedException) { return -1; }   // MemoryStream over a fixed buffer is not expandable
+        }
+
+        static void WritePayload(BinaryWriter w)
+        {
                 w.Write(TasClock.Tick);
                 w.Write(TasClock.Exists ? TasClock.i.simTime : 0.0);
                 w.Write(TasSim.Rng.s);
@@ -92,14 +118,20 @@ namespace Tas
                     if (extras[k] != null) extras[k].TasSave(w);
 
                 w.Flush();
-                return ms.ToArray();
-            }
         }
 
         public static void Restore(byte[] data)
         {
             if (data == null) return;
-            using (MemoryStream ms = new MemoryStream(data))
+            Restore(data, data.Length);
+        }
+
+        public static void Restore(byte[] data, int len)
+        {
+            if (data == null || len <= 0) return;
+            try
+            {
+            using (MemoryStream ms = new MemoryStream(data, 0, len, false, false))
             using (BinaryReader r = new BinaryReader(ms))
             {
                 long tick = r.ReadInt64();
@@ -129,6 +161,13 @@ namespace Tas
                     if (k < extras.Count && extras[k] != null) extras[k].TasLoad(r);
 
                 Physics.SyncTransforms();
+                }
+            }
+            catch (Exception e)
+            {
+                // A silent partial restore is worse than a crash: you would TAS from a corrupt
+                // state and blame the tape. Make it loud and refuse to continue.
+                Debug.LogError("[TAS] snapshot restore failed (registered state changed shape?): " + e);
             }
         }
 

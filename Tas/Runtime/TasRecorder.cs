@@ -6,139 +6,125 @@ using UnityEngine;
 namespace Tas
 {
     /// <summary>
-    /// Drop-in replacement for DemoRecorder, same shape and same public surface, but it
-    /// records INPUT TICKS instead of transform snapshots.
+    /// Drop-in replacement for DemoRecorder, same gates and API shape, but it records INPUT
+    /// TICKS and it is the object that owns the run's tick list - which is what makes the
+    /// rollback / branch / splice cycle of a TAS tool possible.
     ///
-    /// What was carried over 1:1: static i, cfgEnabled, meta2Enabled, the Network.OnMeta2Set
-    /// gate, raceMode suppression, ReloadPlayerData() identity snapshot, StartNewRecording /
-    /// EndRecording, the frame cap.
-    ///
-    /// What was fixed:
-    ///  - sampling is tick-counted by TasClock, so a 30fps device and a 120fps device
-    ///    produce identical tapes (the old fpsTimeTotal += Time.deltaTime sampler did not).
-    ///  - no ShallowCopy() per frame and no List&lt;T&gt; growth from 7200 to 36000: one
-    ///    struct array, amortised doubling, zero per-tick allocation.
-    ///  - fpsCap semantics: it used to be a *sampling* cap on a free-running sim. Now the
-    ///    tick rate IS the sim rate, which is the only version that can be replayed.
-    ///  - totalFrameLimit now ends the run explicitly (endedByCap) instead of silently
-    ///    returning early while the timer keeps accumulating.
-    ///  - GetInputData()/record_touches were dead code; that data is now the payload.
+    /// Carried over: static i, cfgEnabled, meta2Enabled, the Network.OnMeta2Set gate, raceMode
+    /// suppression, the identity snapshot, StartNewRecording / EndRecording, the frame cap.
+    /// Fixed: tick-counted sampling, no per-frame ShallowCopy, explicit end-on-cap, and the
+    /// previously-dead GetInputData() is now the payload.
+    /// Added for a TAS tool: truncation on rollback, branch splice, per-tick savestates, and
+    /// a live-tape view so the tool window can paint frames while you play.
     /// </summary>
-    [DefaultExecutionOrder(32000)]   // last FixedUpdate of the tick => captures post-sim state
+    [DefaultExecutionOrder(32000)]
     public sealed class TasRecorder : MonoBehaviour
     {
-        // ---- static gates, identical to DemoRecorder ----
         public static bool cfgEnabled = true;
         public static bool meta2Enabled = true;
         public static bool record_touches = true;
         public static TasRecorder i;
 
-        [Header("Wiring (same fields as DemoRecorder)")]
+        /// <summary>Wire these where you already call DemoRecorder, or leave them null.</summary>
+        public static System.Func<bool> RaceModeProbe;
+        public System.Func<int> SpeedReader;          // () => (int)fpsChar.speed
+
+        [Header("Refs (auto-found if null)")]
         public Transform player;
         public Transform playerCam;
         public Rigidbody playerRb;
 
-        [Tooltip("Wired in your bootstrap, so this file keeps no hard dependency: " +
-                 "recorder.SpeedReader = () => (int)fpsChar.speed;  TasRecorder.RaceModeProbe = () => GameState.raceMode;")]
-        public System.Func<int> SpeedReader;
-        public static System.Func<bool> RaceModeProbe;
-
         [Header("Limits")]
         public int tickRate = 60;
-        public int maxTicks = 36000;           // 10 min, same ceiling as totalFrameLimit
-        public int checkpointEvery = 300;      // 5s of state at 60Hz, for correction + seeking
+        public int maxTicks = 216000;
+        public int checkpointEvery = 60;
 
         [Header("Output")]
         public string outDir;
+        public bool savestateEveryTick = true;
 
-        // ---- live state ----
+        [Header("Resim correction")]
+        public float snapTolerance = 0.35f;
+
+        // ---- state ----
         public bool recording;
         public bool endedByCap;
-        public long startTick;
         public int frameCount;
-        public int speed;                       // kept for parity with the old HUD/leaderboard field
+        public int speed;
+        public uint liveHash = 2166136261u;
 
-        TasInputFrame[] frames;
-        List<TasCheckpoint> checkpoints = new List<TasCheckpoint>(128);
-        TasCheckpoint scratch;
+        readonly List<TasInputFrame> frames = new List<TasInputFrame>(8192);
+        readonly List<TasCheckpoint> checkpoints = new List<TasCheckpoint>(256);
         TasTape tape = new TasTape();
-        uint liveHash;
         TasRng rng;
 
         public event Action<TasTape> OnTapeReady;
 
+        public IReadOnlyList<TasInputFrame> Frames { get { return frames; } }
+        public List<TasCheckpoint> CheckpointList { get { return checkpoints; } }
+        public int TickCount { get { return frames.Count; } }
+        public int CheckpointCount { get { return checkpoints.Count; } }
+        public bool CanBranch { get { return frames.Count > 0; } }
+        public uint AccumulatorAtParent { get { return liveHash; } }
+        public double RunSeconds { get { return frames.Count * (1.0 / Mathf.Max(1, tickRate)); } }
+        public TasTape Tape { get { return tape; } }
+        public double LastCheckpointTickF { get { return checkpoints.Count > 0 ? checkpoints[checkpoints.Count - 1].tick : -1; } }
+
         void Awake()
         {
             i = this;
-            if (string.IsNullOrEmpty(outDir))
-                outDir = Path.Combine(Application.persistentDataPath, "tas");
-            Directory.CreateDirectory(outDir);
-
+            if (string.IsNullOrEmpty(outDir)) outDir = TasToolConfig.Dir;
+            try { Directory.CreateDirectory(outDir); } catch { }
             if (TasClock.Exists) tickRate = TasClock.i.tickRate;
-            NetworkMeta2Hook(true);
+            AutoFind();
         }
 
-        void OnDestroy()
-        {
-            NetworkMeta2Hook(false);
-            if (i == this) i = null;
-        }
+        void OnDestroy() { if (i == this) i = null; }
 
-        /// <summary>
-        /// The remote kill-switch, same contract as before ("v" = on). Routed through the
-        /// deferred queue so the toggle lands on a tick boundary and is therefore replayable.
-        /// </summary>
-        void NetworkMeta2Hook(bool on)
+        void AutoFind()
         {
-            // if (on) Network.OnMeta2Set += On_Meta2Set; else Network.OnMeta2Set -= On_Meta2Set;
-            // ⚠ uncomment in your project (it lives in your Network class, not in this file).
-        }
-
-        void On_Meta2Set(string meta2)
-        {
-            TasDeferred.Post("meta2", delegate
+            if (player == null)
             {
-                meta2Enabled = meta2 == "v";
-                if (!meta2Enabled && recording) Stop(true);
-            });
+                GameObject go = GameObject.FindGameObjectWithTag("Player");
+                if (go != null) { player = go.transform; playerRb = go.GetComponent<Rigidbody>(); }
+            }
+            if (playerCam == null)
+            {
+                Camera c = Camera.main;
+                if (c != null) playerCam = c.transform;
+            }
         }
 
-        void Start()
+        void Start() { enabled = false; }        // same as DemoRecorder: armed by StartNewRecording
+
+        void OnEnable()
         {
-            enabled = false;   // same as DemoRecorder.Start(): armed by StartNewRecording()
+            if (TasClock.Exists) TasClock.i.OnTickTail += OnTail;
         }
 
-        // ------------------------------------------------------------------ public API
+        void OnDisable()
+        {
+            if (TasClock.Exists) TasClock.i.OnTickTail -= OnTail;
+        }
+
+        // ------------------------------------------------------------------ config / identity
 
         public void ReloadPlayerData()
         {
             TasTapeHeader h = tape.header;
-            // ⚠ these four lines are the mapping from your DemoData identity fields:
-            // h.mapname   = MapIsimHelpers.ServerMapIsimGetir();
-            // h.nick      = Prefs.ServerNick;
-            // h.flagId    = Prefs.SelectedFlag;
-            // h.avatarId  = Prefs.SelectedAvatar;
-            // h.knifeId   = InventoryHelpers.aktifBicak;
-            // h.capeId    = InventoryHelpers.aktifCape;
-            // h.gloveId   = InventoryHelpers.aktifEldiven;
-            // h.effectId  = InventoryHelpers.aktifPlayerEffect;
-            // h.rankStr -> rankIdx = GameManagerHelpers.RankIndexBul(GameManagerHelpers.RankBelirle());
+            // ⚠ same fields your DemoRecorder.ReloadPlayerData() fills:
+            // h.mapname = MapIsimHelpers.ServerMapIsimGetir();
+            // h.nick = Prefs.ServerNick;
+            // h.flagId = Prefs.SelectedFlag;  h.avatarId = Prefs.SelectedAvatar;
+            // h.knifeId = InventoryHelpers.aktifBicak; h.capeId = InventoryHelpers.aktifCape;
+            // h.gloveId = InventoryHelpers.aktifEldiven; h.effectId = InventoryHelpers.aktifPlayerEffect;
+            // h.rankStr = GameManagerHelpers.RankBelirle();
+            // h.rankIdx = GameManagerHelpers.RankIndexBul(h.rankStr);
             h.gameVersion = Application.version;
-            h.controlType = CachedPrefsGetInt(PInt_ControlType, 0);
-            h.controlTypeStr = CachedPrefsGetString(PString_ControlTypeStr, "");
             h.mapHash = TasTape.HashOf(h.mapname);
             h.configHash = ComputeConfigHash();
         }
 
-        static readonly int PInt_ControlType = 0;
-        static readonly int PString_ControlTypeStr = 0;
-        static int CachedPrefsGetInt(int k, int d) { return d; }
-        static string CachedPrefsGetString(int k, string d) { return d; }
-
-        /// <summary>
-        /// Everything that can change the meaning of a tick. If a replay is played on a
-        /// build whose configHash differs, refuse rather than silently showing a desync.
-        /// </summary>
         public static uint ComputeConfigHash()
         {
             uint h = 2166136261u;
@@ -156,149 +142,142 @@ namespace Tas
             return h;
         }
 
+        // ------------------------------------------------------------------ lifecycle
+
         public void StartNewRecording()
         {
             if (IsRaceMode()) { enabled = false; return; }
             if (!cfgEnabled || !meta2Enabled) return;
 
-            Debug.Log("[TAS] StartNewRecording tickRate=" + tickRate);
-
             if (!TasClock.Exists)
-                Debug.LogError("[TAS] No TasClock in the scene - the tape would be meaningless. Add one.");
+            {
+                Debug.LogError("[TAS] no TasClock in the scene - add one (TasTool creates it automatically)");
+                return;
+            }
+            if (recording) StopRecording(true);
 
-            if (TasClock.Exists && tickRate != TasClock.i.tickRate)
-                TasClock.i.SetTickRate(tickRate);
+            TasToolConfig cfg = TasToolConfig.Load();
+            tickRate = cfg.tickRate;
+            maxTicks = cfg.maxTicks;
+            checkpointEvery = cfg.checkpointEvery;
+            savestateEveryTick = cfg.snapshotEveryTick;
+            TasClock.i.SetTickRate(tickRate);
+
+            Debug.Log("[TAS] StartNewRecording @tick " + TasClock.Tick + "  " + tickRate + "Hz");
 
             tape = new TasTape();
             tape.header.tickRate = tickRate;
             tape.header.checkpointEvery = Mathf.Max(1, checkpointEvery);
             tape.header.rngSeed = TasRng.FromNow().s;
             rng = new TasRng(tape.header.rngSeed);
-            tape.frames.Clear();
-            tape.checkpoints.Clear();
-            checkpoints.Clear();
+            TasSim.Rng = rng;
+            TasSim.Accumulator = liveHash = 2166136261u;
 
+            frames.Clear();
+            checkpoints.Clear();
+            frames.Capacity = Mathf.Max(frames.Capacity, Mathf.Min(maxTicks, 1 << 16));
             frameCount = 0;
-            startTick = TasClock.Tick;
-            liveHash = 2166136261u;
             endedByCap = false;
 
             ReloadPlayerData();
 
-            frames = new TasInputFrame[Mathf.Max(8192, maxTicks)];   // one alloc for the whole run
-
-            if (TasClock.Exists)
-            {
-                TasClock.i.OnTickTail += OnTail;
-            }
-
+            TasSavestates.Init(cfg.ringCapacity);
+            TasSavestates.ClearRing();
             enabled = true;
             recording = true;
         }
 
-        public TasTape EndRecording()
-        {
-            if (!recording) return null;
-            return Stop(true);
-        }
+        public TasTape EndRecording() { return StopRecording(true); }
 
-        TasTape Stop(bool persist)
+        public TasTape StopRecording(bool persist)
         {
+            if (!recording) return tape;
             recording = false;
             enabled = false;
-            if (TasClock.Exists)
-            {
-            if (TasClock.Exists) TasClock.i.OnTickTail -= OnTail;
-            }
 
-            tape.frames = new List<TasInputFrame>(frameCount);
-            for (int k = 0; k < frameCount; k++) tape.frames.Add(frames[k]);
-            tape.checkpoints = checkpoints;
+            tape.frames = new List<TasInputFrame>(frames);
+            tape.checkpoints = new List<TasCheckpoint>(checkpoints);
             tape.BuildIndex();
             tape.metaJson = JsonUtility.ToJson(tape.header);
 
             Debug.Log("[TAS] EndRecording " + tape.Summary() + (endedByCap ? " (hit maxTicks)" : ""));
-
             if (persist) SaveTape();
             if (OnTapeReady != null) OnTapeReady(tape);
             return tape;
         }
 
-        /// <summary>Live snapshot while recording (the editor reads this), finished tape after Stop().</summary>
-        public TasTape Tape
-        {
-            get
-            {
-                if (!recording) return tape;
-                TasTape live = new TasTape();
-                live.header = tape.header;
-                for (int k = 0; k < frameCount; k++) live.frames.Add(frames[k]);
-                for (int k = 0; k < checkpoints.Count; k++) live.checkpoints.Add(checkpoints[k]);
-                live.BuildIndex();
-                return live;
-            }
-        }
+        public string LastSavedPath { get; private set; }
 
         public string SaveTape()
         {
-            string path = Path.Combine(outDir, Sanitize(tape.header.nick) + "_" +
-                                        tape.header.mapname + "_" + DateTime.UtcNow.ToString("yyyyMMdd_HHmmss") + ".tas");
+            tape.frames = new List<TasInputFrame>(frames);
+            tape.checkpoints = new List<TasCheckpoint>(checkpoints);
+            tape.BuildIndex();
+            string path = Path.Combine(outDir, TasTool.Sanitize(tape.header.nick) + "_" +
+                                       tape.header.mapname + "_" + DateTime.UtcNow.ToString("yyyyMMdd_HHmmss") + ".tas");
             try { TasTape.Write(path, tape); }
             catch (Exception e) { Debug.LogError("[TAS] write failed: " + e.Message); return null; }
-            Debug.Log("[TAS] wrote " + path + " (" + new FileInfo(path).Length + " bytes)");
+            LastSavedPath = path;
+            tape.SavedPath = path;
+            Debug.Log("[TAS] wrote " + path + " (" + new FileInfo(path).Length + " B)");
             return path;
         }
 
-        // ------------------------------------------------------------------ tick plumbing
-
+        // ------------------------------------------------------------------ per-tick
 
         void OnTail()
         {
-            if (!recording || frameCount >= maxTicks)
+            if (!recording) return;
+
+            if (frames.Count >= maxTicks)
             {
-                if (recording && frameCount >= maxTicks && !endedByCap)
+                if (!endedByCap)
                 {
                     endedByCap = true;
-                    Debug.LogWarning("[TAS] maxTicks (" + maxTicks + ") reached - run ended, not truncated mid-tick.");
-                    Stop(true);
+                    Debug.LogWarning("[TAS] maxTicks (" + maxTicks + ") reached - run ends cleanly, not truncated.");
+                    TasTool.NotifyMapFinished("maxTicks");
                 }
                 return;
             }
 
             TasInputFrame f = TasInput.Current;
-            if (frameCount > 0)
+            if (frames.Count > 0)
             {
-                TasInputFrame p = frames[frameCount - 1];
-                // rising edges are derived from held state on replay too; strip the live-only bit
-                // so that record and playback compute it identically from the tape.
+                TasInputFrame p = frames[frames.Count - 1];
+                // Edges are DERIVED from held bits so that a hand-edited tape and a captured tape
+                // compute them identically. Never trust a live GetKeyDown for this.
                 f.Set(TasButton.JumpPressed, f.Has(TasButton.Jump) && !p.Has(TasButton.Jump));
                 f.Set(TasButton.FirePressed, f.Has(TasButton.Fire) && !p.Has(TasButton.Fire));
             }
 
-            frames[frameCount++] = f;
+            frames.Add(f);
+            frameCount = frames.Count;
 
+            liveHash = TasRng.Mix(liveHash, f.buttons);
             liveHash = TasRng.Mix(liveHash, f.lookX);
             liveHash = TasRng.Mix(liveHash, f.aimX | (f.aimY << 16));
-            liveHash = TasRng.Mix(liveHash, f.buttons);
-            TasSim.Accumulator = liveHash;   // so a snapshot carries the divergence state too
             if (player != null)
             {
                 liveHash = TasRng.Mix(liveHash, player.position.x);
                 liveHash = TasRng.Mix(liveHash, player.position.y);
                 liveHash = TasRng.Mix(liveHash, player.position.z);
             }
+            TasSim.Accumulator = liveHash;
 
-            int rel = frameCount;
-            if (rel == 1 || (rel % Mathf.Max(1, checkpointEvery)) == 0)
+            int period = Mathf.Max(1, checkpointEvery);
+            if (frames.Count == 1 || ((frames.Count - 1) % period) == 0)
                 checkpoints.Add(CaptureCheckpoint());
 
             if (SpeedReader != null) speed = SpeedReader();
+
+            // after the hash/checkpoint bookkeeping so a restored snapshot lands mid-run correctly
+            if (savestateEveryTick) TasSavestates.Push();
         }
 
         TasCheckpoint CaptureCheckpoint()
         {
-            TasCheckpoint c = scratch;
-            c.tick = (int)TasClock.Tick - (int)startTick;
+            TasCheckpoint c = new TasCheckpoint();
+            c.tick = frames.Count - 1;
             if (player != null)
             {
                 c.Position = player.position;
@@ -310,26 +289,77 @@ namespace Tas
             return c;
         }
 
-        static int ReadSpeed(object fps) { return 0; }   // ⚠ ((RigidbodyFirstPersonController)fps).speed
-        static bool IsRaceMode() { return false; }        // ⚠ return GameState.raceMode;
-        static string Sanitize(string s)
+
+        // ------------------------------------------------------------------ rollback plumbing
+
+        /// <summary>
+        /// Cut the trunk at tick and make that the live run. `liveHash` is rewound to the value
+        /// the run had there, otherwise every checkpoint after the cut looks like a desync.
+        /// </summary>
+        public bool TruncateTo(int tick, uint hashAtTick)   // hashAtTick: TasSim.Accumulator at that tick
         {
-            if (string.IsNullOrEmpty(s)) return "anon";
-            foreach (char c in Path.GetInvalidFileNameChars())
-                if (s.IndexOf(c) >= 0) s = s.Replace(c.ToString(), "");
-            return s;
+            if (tick < 0 || tick > frames.Count) return false;
+            while (frames.Count > tick) frames.RemoveAt(frames.Count - 1);
+            for (int k = checkpoints.Count - 1; k >= 0; k--)
+                if (checkpoints[k].tick >= tick) checkpoints.RemoveAt(k);
+            frameCount = frames.Count;
+            liveHash = hashAtTick;
+            TasSim.Accumulator = hashAtTick;
+            endedByCap = false;
+            Debug.Log("[TAS] trunk truncated to tick " + tick + " (" + RunSeconds.ToString("0.000") + "s)");
+            return true;
         }
 
+        public bool SpliceTail(int fromTick, List<TasInputFrame> tail, List<TasCheckpoint> tailCk, uint hashAtCut)
+        {
+            if (fromTick < 0 || fromTick > frames.Count) return false;
+            while (frames.Count > fromTick) frames.RemoveAt(frames.Count - 1);
+            for (int k = checkpoints.Count - 1; k >= 0; k--)
+                if (checkpoints[k].tick >= fromTick) checkpoints.RemoveAt(k);
 
-        /// <summary>Editor/debug parity with GetDemoJson(); prints a human-readable tick list.</summary>
+            for (int k = 0; k < tail.Count; k++) frames.Add(tail[k]);
+            // checkpoint ticks are absolute within the trunk, so a sorted merge keeps seeking honest
+            for (int k = 0; k < tailCk.Count; k++)
+            {
+                TasCheckpoint c = tailCk[k];
+                int at = checkpoints.Count;
+                while (at > 0 && checkpoints[at - 1].tick > c.tick) at--;
+                checkpoints.Insert(at, c);
+            }
+
+            frameCount = frames.Count;
+            liveHash = hashAtCut;
+            for (int k = 0; k < tail.Count; k++)
+            {
+                TasInputFrame f = tail[k];
+                liveHash = TasRng.Mix(liveHash, f.buttons);
+                liveHash = TasRng.Mix(liveHash, f.lookX);
+            }
+            TasSim.Accumulator = liveHash;
+            return true;
+        }
+
+        public void LoadIntoTrunk(TasTape t)
+        {
+            frames.Clear(); checkpoints.Clear();
+            if (t != null)
+            {
+                for (int k = 0; k < t.frames.Count; k++) frames.Add(t.frames[k]);
+                for (int k = 0; k < t.checkpoints.Count; k++) checkpoints.Add(t.checkpoints[k]);
+            }
+            frameCount = frames.Count;
+            tape = t ?? new TasTape();
+        }
+
+        static bool IsRaceMode() { return RaceModeProbe != null && RaceModeProbe(); }
+
         public void GetTasJson()
         {
-            if (frameCount == 0) { Debug.Log("[TAS] empty"); return; }
+            if (frames.Count == 0) { Debug.Log("[TAS] empty"); return; }
             var sb = new System.Text.StringBuilder();
-            int n0 = Mathf.Max(0, frameCount - 12);
-            for (int k = n0; k < frameCount; k++)
-                sb.Append(k).Append(": ").Append(frames[k].Pretty()).Append('\n');
-            Debug.Log("[TAS] tail " + frameCount + "\n" + sb);
+            int n0 = Mathf.Max(0, frames.Count - 12);
+            for (int k = n0; k < frames.Count; k++) sb.Append(k).Append(": ").Append(frames[k].Pretty()).Append('\n');
+            Debug.Log("[TAS] tail " + frames.Count + "\n" + sb);
         }
     }
 }

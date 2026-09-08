@@ -89,10 +89,10 @@ namespace Tas
             index = Mathf.Clamp(fromTick, 0, length - 1);
             divergences = 0; corrections = 0; liveHash = 2166136261u;
 
-            if (m != TasPlaybackMode.SpectateState) TasClock.i.ResetClock();
-            TasClock.i.SetManual(m != TasPlaybackMode.SpectateState);
+            if (m == TasPlaybackMode.ResimVerify) TasClock.i.ResetClock();
             TasClock.i.paused = false;
             TasClock.i.speed = speed;
+            ChooseMode();
 
             TasInput.SourcedFromTape = true;
             if (blockInputWhilePlaying) TasInput.BlockLiveInput = true;
@@ -109,9 +109,24 @@ namespace Tas
         {
             playing = false;
             Detach();
-            if (TasClock.Exists) { TasClock.i.SetManual(false); TasClock.i.paused = false; }
+            if (TasClock.Exists) { TasClock.i.SetMode(TasClockMode.Auto); TasClock.i.paused = false; }
             TasInput.ReleaseToLive();
             TasInput.BlockLiveInput = false;
+        }
+
+        /// <summary>
+        /// Spectate needs nothing. 1x re-sim is just the game running normally with the tape
+        /// feeding its input (Auto mode, engine cadence - smoothest and requires no patches).
+        /// Below 1x or paused, Hold mode cancels the non-tick frames. Only headless verification
+        /// uses Manual, where we drive the step ourselves and rendering is irrelevant.
+        /// </summary>
+        public void ChooseMode()
+        {
+            if (!TasClock.Exists) return;
+            if (mode == TasPlaybackMode.SpectateState) { TasClock.i.SetMode(TasClockMode.Auto); return; }
+            if (mode == TasPlaybackMode.ResimVerify) { TasClock.i.SetMode(TasClockMode.Manual); return; }
+            TasClock.i.SetMode(Mathf.Abs((float)speed - 1f) < 0.001f && !TasClock.i.paused
+                                ? TasClockMode.Auto : TasClockMode.Hold);
         }
 
         void Detach()
@@ -130,10 +145,20 @@ namespace Tas
         /// </summary>
         public void SeekTo(int tick)
         {
-            if (tape == null) return;
+            if (tape == null || !TasClock.Exists) return;
             tick = Mathf.Clamp(tick, 0, length - 1);
             if (mode == TasPlaybackMode.SpectateState) { index = tick; ShowStateAt(tick); return; }
 
+            // Exact rewind if the per-tick ring still holds that tick (the usual case with
+            // snapshotEveryTick on). Otherwise fall back to the sparse keyframes and re-sim the
+            // difference, and if there is nothing to restore, re-sim from tick 0.
+            TasStateEntry e;
+            if (TasSavestates.TryRollback(tick, out e))
+            {
+                index = tick;
+                if (OnIndexChanged != null) OnIndexChanged(index);
+                return;
+            }
             int key = tape.NearestCheckpointBefore(tick);
             int start = key >= 0 ? tape.checkpoints[key].tick : 0;
             TasSnapshot.RestoreIfAvailable(start);
@@ -152,7 +177,7 @@ namespace Tas
         public void StepForward(int n = 1)
         {
             if (!TasClock.Exists) return;
-            if (!TasClock.Manual) TasClock.i.SetManual(true);
+            if (TasClock.i.mode != TasClockMode.Hold) TasClock.i.SetMode(TasClockMode.Hold);
             TasClock.i.paused = true;
             if (n < 0) { SeekTo(Mathf.Max(0, index + n)); return; }
             stepping = true;
@@ -236,7 +261,7 @@ namespace Tas
             Detach();
             TasInput.ReleaseToLive();
             TasInput.BlockLiveInput = false;
-            if (mode != TasPlaybackMode.SpectateState) TasClock.i.SetManual(false);
+            TasClock.i.SetMode(TasClockMode.Auto);
             Debug.Log(string.Format("[TAS] playback end ticks={0} divergences={1} corrections={2} mode={3}",
                 index, divergences, corrections, mode));
             if (OnFinished != null) OnFinished();
@@ -263,8 +288,22 @@ namespace Tas
         }
 
         public TasTape Tape { get { return tape; } }
-        public void SetSpeed(double s) { speed = Mathf.Clamp((float)s, 0.0625f, 16f); if (TasClock.Exists) TasClock.i.speed = speed; }
-        public void SetPaused(bool p) { if (TasClock.Exists) TasClock.i.paused = p; }
+        public void SetSpeed(double s)
+        {
+            speed = Mathf.Clamp((float)s, 0.03125, 16f);
+            if (TasClock.Exists)
+            {
+                TasClock.i.speed = speed;
+                ChooseMode();
+            }
+        }
+
+        public void SetPaused(bool p)
+        {
+            if (!TasClock.Exists) return;
+            TasClock.i.paused = p;
+            ChooseMode();
+        }
 
         public double RunSeconds { get { return index * (1.0 / Mathf.Max(1, tape != null ? tape.header.tickRate : 60)); } }
     }

@@ -76,6 +76,7 @@ namespace Tas
         public List<TasInputFrame> frames = new List<TasInputFrame>(8192);
         public List<TasCheckpoint> checkpoints = new List<TasCheckpoint>(64);
         public string metaJson;
+        public string SavedPath;
 
         // ---- streaming write: no big managed List peak, no GC spikes mid-run ----
         public static void Write(string path, TasTape tape)
@@ -90,6 +91,7 @@ namespace Tas
             }
             if (File.Exists(path)) File.Delete(path);
             File.Move(tmp, path);
+            tape.SavedPath = path;
         }
 
         public static void WriteTo(BinaryWriter w, TasTape tape)

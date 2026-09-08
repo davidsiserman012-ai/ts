@@ -3,7 +3,8 @@ using UnityEngine;
 namespace Tas
 {
     /// <summary>
-    /// On-screen TAS readout + hotkeys. The input display is not decoration: it is how a
+    /// On-screen TAS readout (the hotkeys live in TasTool now - one owner for keys, or you get
+    /// double toggles). The input display is not decoration: it is how a
     /// viewer tells a real run from a hand-written tape, and it is the fastest way for you to
     /// see that a recorded tick and a replayed tick differ.
     /// </summary>
@@ -41,21 +42,6 @@ namespace Tas
             for (int k = 0; k < 4; k++) a[k] = c;
             t.SetPixels(a); t.Apply();
             return t;
-        }
-
-        void Update()
-        {
-            if (!hotkeys) return;
-            if (!TasClock.Exists || TasPlayback.i == null) return;
-
-            if (Input.GetKeyDown(KeyCode.F9)) Toggle();
-            if (Input.GetKeyDown(KeyCode.F10)) { if (TasRecorder.i != null) TasRecorder.i.StartNewRecording(); }
-            if (Input.GetKeyDown(KeyCode.F11)) { if (TasRecorder.i != null) TasRecorder.i.EndRecording(); }
-            if (Input.GetKeyDown(KeyCode.KeypadMinus)) TasClock.i.StepOnce();
-            if (Input.GetKeyDown(KeyCode.KeypadPlus)) { for (int k = 0; k < 10; k++) TasClock.i.StepOnce(); }
-            if (Input.GetKeyDown(KeyCode.Comma)) TasClock.i.speed = Mathf.Max(0.0625, TasClock.i.speed * 0.5f);
-            if (Input.GetKeyDown(KeyCode.Period)) TasClock.i.speed = Mathf.Min(16f, TasClock.i.speed * 2f);
-            if (Input.GetKeyDown(KeyCode.Slash)) { TasClock.i.speed = 1.0; TasClock.i.paused = false; }
         }
 
         public void Toggle()
