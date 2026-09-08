@@ -144,10 +144,29 @@ namespace Tas
             return f;
         }
 
+        public float InputDataX { get { return auxA / (float)FP; } }
+        public float Xvel { get { return auxB / (float)FP; } }
+        public float ResolvedX { get { return auxC / (float)FP; } }
+        public float ResolvedY { get { return auxD / (float)FP; } }
+
         public float AuxA { get { return auxA / (float)FP; } }
         public float AuxB { get { return auxB / (float)FP; } }
         public float AuxC { get { return auxC / (float)FP; } }
         public float AuxD { get { return auxD / (float)FP; } }
+
+        /// <summary>Record the resolved GetInput() pair (integrity check on keyboard, input on Tap/Analog).</summary>
+        public void ResolvedXSet(float x, float y)
+        {
+            auxC = (short)Mathf.Clamp(Mathf.RoundToInt(x * FP), -32767, 32767);
+            auxD = (short)Mathf.Clamp(Mathf.RoundToInt(y * FP), -32767, 32767);
+        }
+
+        /// <summary>Record inputDataX and the xvel accumulator for the integrity check.</summary>
+        public void ResolvedStrafe(float inputDataX, float xvel)
+        {
+            auxA = (short)Mathf.Clamp(Mathf.RoundToInt(inputDataX * FP), -32767, 32767);
+            auxB = (short)Mathf.Clamp(Mathf.RoundToInt(xvel * FP), -32767, 32767);
+        }
 
         public static int FromFloat(float v)
         {

@@ -34,6 +34,11 @@ namespace Tas
             s.vel = rb != null ? rb.velocity : Vector3.zero;
             s.angVel = rb != null ? rb.angularVelocity : Vector3.zero;
             s.kinematic = rb != null && rb.isKinematic;
+            // isSleeping is not cosmetic here: this controller calls m_RigidBody.Sleep() when it is
+            // nearly still, and a sleeping body ignores AddRelativeForce until something wakes it.
+            // Roll back to a sleeping frame and replay wakes it a tick earlier than the run did.
+            s.sleeping = rb != null && rb.IsSleeping();
+            s.gravity = rb == null || rb.useGravity;
         }
 
         public static void Restore(ref Rigidbody rb, ref Transform t, ref TasRigidbodyState s)
@@ -45,6 +50,8 @@ namespace Tas
                 rb.isKinematic = s.kinematic;
                 rb.velocity = s.vel;
                 rb.angularVelocity = s.angVel;
+                rb.useGravity = s.gravity;
+                if (s.sleeping) rb.Sleep(); else rb.WakeUp();
             }
         }
     }
@@ -56,5 +63,7 @@ namespace Tas
         public Vector3 vel;
         public Vector3 angVel;
         public bool kinematic;
+        public bool sleeping;
+        public bool gravity;
     }
 }

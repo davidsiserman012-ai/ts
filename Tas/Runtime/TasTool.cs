@@ -180,6 +180,15 @@ namespace Tas
 
             if (cfg.autoRecordOnGameStart)
             {
+                if (!cfg.enforceFixedRate && cfg.refuseRecordWhenRateUnpinned)
+                {
+                    statusLine = "REFUSED to record: enforceFixedRate is off, and this game's input " +
+                                 "resolution (GetInput/GetTapX/xvel/total_frame) is frame-rate dependent. " +
+                                 "Turn it on, or turn off refuseRecordWhenRateUnpinned if you know why.";
+                    Debug.LogError("[TAS] " + statusLine);
+                    session = TasSession.WaitingForGameStart;
+                    return;
+                }
                 if (OnRecordStart != null) OnRecordStart();
                 recorder.StartNewRecording();
                 session = TasSession.Recording;

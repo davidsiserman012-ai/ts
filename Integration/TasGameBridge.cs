@@ -85,6 +85,9 @@ public sealed class TasGameBridge : MonoBehaviour
     /// -9.81*0.25 and everywhere else -13.5, so a tape recorded before GravityAyarla() and replayed
     /// after it would be silently wrong.
     /// </summary>
+    public RigidbodyFirstPersonController Controller { get { return gm != null ? gm.m_playerController : null; } }
+    public GameManager Manager { get { return gm; } }
+
     void TryBind()
     {
         if (gm == null) gm = GameState.gameManagerSingle != null ? GameState.gameManagerSingle : FindObjectOfType<GameManager>();
@@ -104,16 +107,21 @@ public sealed class TasGameBridge : MonoBehaviour
 
         TasRecorder.BindTimeManagerSeconds(delegate { return gm.m_TimeManager != null ? gm.m_TimeManager.Seconds : 0; });
 
-        // Everything that changes what a tick MEANS in this game, from this file.
+        // Everything that changes what a tick MEANS. The controller's own tuning is in here too
+        // (BunnyArtisHizi, BunnyMaxHiz, SurfMaxHiz, groundCheckDistance, analog_bunny_mult, ...)
+        // because those fields are serialized per-prefab and someone WILL tweak them in the editor;
+        // Prefs.Sensivity is in here because `if (sens < 1f) fromStrafe *= sens` makes sensitivity part
+        // of the physics, and `if (!Application.isMobilePlatform) sensMultiplier = 1f` makes the
+        // platform part of it. A tape is only meaningful relative to all of that.
         TasRecorder.ExtraConfigProbe = delegate
         {
-            uint h = 2166136261u;
+            uint h = TasUnityBridge.ConfigExtras();
             h = TasRng.Mix(h, (int)Prefs.ControlType);
             h = TasRng.Mix(h, GameState.TapMode ? 1 : 0);
             h = TasRng.Mix(h, GameState.SurfSliding ? 2 : 0);
             h = TasRng.Mix(h, Physics.gravity.y);
+            h = TasRng.Mix(h, Physics.gravity.z);
             h = TasRng.Mix(h, GameState.JumpForceCarpan);
-            h = TasRng.Mix(h, Mathf.RoundToInt(c.MaxHizY * 1000f));
             h = TasRng.Mix(h, GameState.ActiveBoost);
             if (GameState.i != null && GameState.i.ActiveMapScene != null)
             {
@@ -144,7 +152,7 @@ public sealed class TasGameBridge : MonoBehaviour
         if (stats == null && gm.m_player != null) stats = gm.m_player.AddComponent<TasPlayerRunStats>();
         if (stats != null) stats.Bind(gm);
 
-        TasInputAdapter.Bind(gm);
+        TasUnityBridge.Bind(gm);
     }
 
     void Update()
@@ -189,19 +197,24 @@ public sealed class TasGameBridge : MonoBehaviour
 }
 
 /// <summary>
-/// Per-run state that lives on RigidbodyFirstPersonController / GameState and is NOT derivable from
-/// position + velocity. GameManager.StartGame() zeroes exactly these fields, which is the tell: the
-/// game itself treats them as run-scoped, so a savestate has to as well.
+/// Per-run state on the player that a transform+velocity snapshot cannot reconstruct.
 ///
-/// total_carpan / max_carpan* are the carry multipliers. They feed jump force. If you rewind to a
-/// savestate and those keep the post-crash values, the retry has different physics than the first
-/// attempt and the "one continuous run" tape no longer reproduces itself - the classic
-/// "rollback worked in the editor but not in the build" bug is usually this class of omission.
+/// The list is not arbitrary: it is every field this controller writes but never resets, which is
+/// the same thing StartGame() treats as run-scoped. Three of them are load-bearing for physics:
+///   lookAccum      - Update() accumulates it, FixedUpdate() spends AND CLEARS it. Capturing in
+///                    LateUpdate is what makes a restore land on the right side of that handoff;
+///                    capturing at the tick tail would restore 0 and drop a frame of turn.
+///   lastBunnyFrame - gates the one-push-per-input-frame (`if (lastBunnyFrame != inputData.inputLastFrame)`)
+///   active180      - selects the Don180MaxHiz clamp, and a coroutine clears it 0.2 s later
+/// plus xvel (a clamped accumulator), m_bunnyCarpan/_bmax/mag/ag (read across the Update/FixedUpdate
+/// boundary while still holding the previous step's values), the total_*/max_* carry stats, and
+/// LevelFizik.MaxHizYDisabled / GameState.TapMode / SurfModeFizik / ControlTypeCache, which are
+/// STATIC-ish and therefore invisible to any per-component snapshot - the sneakiest class of desync.
 /// </summary>
 public sealed class TasPlayerRunStats : MonoBehaviour, ITasSnapshotable
 {
     GameManager gm;
-    RigidbodyFirstPersonController c;
+    UnityStandardAssets.Characters.FirstPerson.RigidbodyFirstPersonController c;
 
     public void Bind(GameManager manager)
     {
@@ -214,26 +227,8 @@ public sealed class TasPlayerRunStats : MonoBehaviour, ITasSnapshotable
 
     public void TasSave(System.IO.BinaryWriter w)
     {
-        if (c == null) { w.Write(0); return; }
-        w.Write(1);
-        w.Write(c.total_speed);
-        w.Write(c.total_carpan);
-        w.Write(c.max_carpan1);
-        w.Write(c.max_carpan2);
-        w.Write(c.max_speed);
-        w.Write(c.max_carpan);
-        w.Write(c.total_frame);
-        w.Write(c.total_frame_carpan);
-        w.Write(c.max_yfactor);
-        w.Write(c.total_force);
-        w.Write(c.MaxHizY);
-        w.Write(c.m_Jump);
-        // velocity/velXZ are deliberately NOT snapshotted: the ring already restores the rigidbody's
-        // linear+angular velocity (TasPhysics.Restore), and re-writing them from a second source is
-        // how you get a half-applied state when the two disagree by one tick.
+        UnityTAS.TasUnityBridge.SaveController(c, w);
 
-        w.Write(GameState.TapMode);
-        w.Write(GameState.SurfSliding);
         w.Write(GameState.b_levelTamamlandi);
         w.Write(GameState.DieOnLevelComplete);
         w.Write(GameState.b_casualBaslangicAyarlandi);
@@ -242,34 +237,13 @@ public sealed class TasPlayerRunStats : MonoBehaviour, ITasSnapshotable
         w.Write(ScoreCollision.totalScoreCollision);
         w.Write(LevelSonu.KaydedilenPuan);
         if (gm != null && gm.m_ScoreManager != null) w.Write(gm.m_ScoreManager.Score); else w.Write(0);
-        w.Write(TasSuspend.Instance != null && TasSuspend.Instance.Suspended);
+        w.Write(UnityTAS.TasSuspendState.Suspended);
     }
 
     public void TasLoad(System.IO.BinaryReader r)
     {
-        if (r.ReadInt32() == 0) return;
-        if (c == null) c = gm != null ? gm.m_playerController : null;
-        if (c != null)
-        {
-            c.total_speed = r.ReadSingle();
-            c.total_carpan = r.ReadSingle();
-            c.max_carpan1 = r.ReadSingle();
-            c.max_carpan2 = r.ReadSingle();
-            c.max_speed = r.ReadSingle();
-            c.max_carpan = r.ReadSingle();
-            c.total_frame = r.ReadSingle();
-            c.total_frame_carpan = r.ReadSingle();
-            c.max_yfactor = r.ReadSingle();
-            c.total_force = r.ReadSingle();
-            c.MaxHizY = r.ReadSingle();
-            c.m_Jump = r.ReadBoolean();
-            c.velocity = r.ReadVector3();
-            c.velXZ = r.ReadVector3();
-        }
-        else { for (int k = 0; k < 12; k++) r.ReadSingle(); r.ReadBoolean(); r.ReadVector3(); r.ReadVector3(); }
+        UnityTAS.TasUnityBridge.LoadController(c, r);
 
-        GameState.TapMode = r.ReadBoolean();
-        GameState.SurfSliding = r.ReadBoolean();
         GameState.b_levelTamamlandi = r.ReadBoolean();
         GameState.DieOnLevelComplete = r.ReadBoolean();
         GameState.b_casualBaslangicAyarlandi = r.ReadBoolean();
@@ -278,14 +252,12 @@ public sealed class TasPlayerRunStats : MonoBehaviour, ITasSnapshotable
         ScoreCollision.totalScoreCollision = r.ReadInt32();
         LevelSonu.KaydedilenPuan = r.ReadInt32();
         int score = r.ReadInt32();
-        bool wasSuspended = r.ReadBoolean();
+        bool suspended = r.ReadBoolean();
         if (gm != null && gm.m_ScoreManager != null) gm.m_ScoreManager.Score = score;
-        if (TasSuspend.Instance != null) TasSuspend.Instance.Suspended = wasSuspended;
+        UnityTAS.TasSuspendState.Suspended = suspended;
 
-        // ⚠ TimeManager is intentionally out of the snapshot: it is a UI/wall clock, and the tape's
-        // tick count is the authoritative run time. If you want the in-game timer to rewind too, add
-        // to TimeManager:  public int SecondsSnap { get/set } and public void Restore(int s) - then
-        // read/write it here. Until then, trust the panel's "t=" number, not the HUD, while rolling back.
-        if (gm != null && gm.m_TimeManager != null && TasClock.Exists) gm.m_TimeManager.Seconds = (int)(TasClock.Tick / TasClock.Rate);
+        // ⚠ TimeManager stays out of the snapshot on purpose: it is a wall/HUD clock and the tape's
+        // tick count is the run time. Add a Restore(int) to TimeManager if you want the HUD to rewind
+        // too; do not make gameplay read it while the tool is live.
     }
 }

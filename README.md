@@ -13,9 +13,11 @@ Native PC TAS tool + deterministic replay tapes for the game's leaderboard demos
 * [`Tas/Runtime/`](Tas/Runtime) — clock, input seam, tape, recorder, playback, savestates, branches,
   leaderboard export, HUD. Drop-in replacement for `DemoRecorder`.
 * [`Tas/Editor/TasToolWindow.cs`](Tas/Editor/TasToolWindow.cs) — `Window ▸ TAS Tool`.
-* [`Integration/`](Integration/) — the 3 game-side files (`TasGameBridge`, `TasInputAdapter`,
+* [`Docs/TasControllerAudit.md`](Docs/TasControllerAudit.md) — what your bunny-hop controller
+  demands: the frame-rate-dependence finding, the full savestate field list, and the 6-line patch.
+* [`Integration/`](Integration/) — the 3 game-side files (`TasGameBridge`, `TasUnityBridge`,
   `TasSuspend`) that live in Assembly-CSharp because they're the only things allowed to know about
-  `GameManager`/`InputManager`/`Prefs`.
+  `GameManager`/`InputManager`/`Prefs`/`GameState`.
 
 Sentinel: `TasToolConfig.toolEnabled = false` makes the whole tool inert and invisible in a
 release build — no hotkeys, no panel, no capture, and no code path that a shipped client can be

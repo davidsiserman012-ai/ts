@@ -23,7 +23,7 @@ code all keep reading their own struct.
 This is better than the "disable InputManager during replay" I told you last round, and I've removed
 that: your live path can keep running, so `t_delta_l_sum`, `mpos_delta` and the cursor bookkeeping
 stay warm and nothing jumps the moment replay releases. What replay *does* need is
-`ResetVars()+ResetInputData()` on both edges (done in `TasInputAdapter`), or the first live frame
+`ResetVars()+ResetInputData()` on both edges (done in `TasUnityBridge.Bind`), or the first live frame
 after a replay inherits the accumulator state from before it.
 
 ### 1a. The off-by-one this file exposed (fixed)

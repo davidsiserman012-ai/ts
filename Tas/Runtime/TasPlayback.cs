@@ -51,6 +51,17 @@ namespace Tas
         public Transform rig;                  // what SpectateState moves
         public Camera rigCam;
 
+        /// <summary>
+        /// Game-side sampler used to sanity-check the tape against the device during playback.
+        /// If input is reaching the sim from a path the tape never recorded (a direct
+        /// Input.GetButton in the controller, a touch handler that bypasses InputData), the run
+        /// still LOOKS like it replays fine and quietly isn't yours. This is how you find out on
+        /// tick 40 instead of on the leaderboard.
+        /// </summary>
+        public static System.Func<TasInputFrame> LiveSampler;
+        public int inputIntegrityErrors;
+        int integrityLogged;
+
         public event Action OnFinished;
         public event Action<int> OnIndexChanged;
 

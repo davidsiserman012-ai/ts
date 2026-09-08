@@ -10,11 +10,17 @@ using UnityEngine;
 /// disk. That is a handful of one-line guards in Prefs setters (best) or at the call sites in
 /// GameManager.Olay_OyuncuDustu (fastest). A TAS tool without this gate is a farm.
 /// </summary>
+/// <summary>Static flag half of the gate, so the TAS bridge can read/set it without a component lookup.</summary>
+public static class TasSuspendState
+{
+    public static bool Suspended;
+}
+
 public sealed class TasSuspend : MonoBehaviour
 {
     public static TasSuspend Instance { get; private set; }
 
-    public bool Suspended;
+    public bool Suspended { get { return TasSuspendState.Suspended; } set { TasSuspendState.Suspended = value; } }
     public int Buffered;
     public int Flushed;
 

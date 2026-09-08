@@ -29,6 +29,13 @@ namespace Tas
         [Header("Timing")]
         public int tickRate = 60;
         public bool enforceFixedRate = true;     // see TasClock.enforceFixedRate
+
+        [Tooltip("Refuse to RECORD when the rate is unpinned. Your GetInput() is called once per " +
+                 "Update and once per FixedUpdate, ButonManager.GetTapX() is consumed by it, and " +
+                 "xvel/total_frame accumulate per step - so an unpinned session records a run whose " +
+                 "input resolution depended on the frame rate at the time. Better to refuse than to " +
+                 "hand out a tape that can never replay.")]
+        public bool refuseRecordWhenRateUnpinned = true;
         public float speed = 1f;                 // 0.03125 .. 8  (playback only)
         public int maxTicks = 216000;            // 1 h at 60 Hz
         public int checkpointEvery = 60;         // 1 s of state for correction + seeking

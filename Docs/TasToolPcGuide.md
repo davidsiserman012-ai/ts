@@ -7,7 +7,7 @@ toolchain in this sandbox — so expect small signature fixes against your Unity
 ## Quickstart (3 steps, no scene edits)
 
 > If you are on the game codebase that has `GameManager`/`InputManager`, step 2 is already done for
-> you: `Integration/TasGameBridge.cs` + `TasInputAdapter.cs` + `TasUnityBridge.cs` + `TasSuspend.cs`
+> you: `Integration/TasGameBridge.cs` + `TasUnityBridge.cs` + `TasSuspend.cs`
 > subscribe to the events your code already fires (`GameState.gameStarted`, `GameManager.OnOyuncuDustu`,
 > `GameManager.OnLevelCompleted`) and tap input at `InputManager.GetInputData()`. Read
 > [`TasGameManagerIntegration.md`](TasGameManagerIntegration.md) instead of the two lines below.
