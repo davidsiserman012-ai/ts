@@ -72,6 +72,18 @@ namespace Tas
         /// <summary>True when this frame's tail callback should run (set by Head, cleared on holds).</summary>
         public bool tailDue;
 
+        /// <summary>
+        /// True for the whole frame in which the sim was cancelled (slow-mo hold / pause). One-way
+        /// door: any *timer-like* thing that runs on Unity's clock - Invoke, coroutines, a UI
+        /// countdown, your TimeManager - keeps advancing during held frames because we cannot reach
+        /// it. Guard those with this flag (one line each) or run slow-mo at 1x. GameManager has both
+        /// Invoke and a WaitForFixedUpdate coroutine, so this is not hypothetical for you.
+        /// </summary>
+        public static bool CancelledFrame { get; private set; }
+
+        /// <summary>Frames that took >3x the tick to render while the sim was unpinned.</summary>
+        public int slowFrames;
+
         /// <summary>THE patch rule for anyone who wants turbo/Manual: sim code uses this, not Time.deltaTime.</summary>
         public static float Delta
         {
@@ -183,6 +195,8 @@ namespace Tas
                 return;
             }
 
+            if (!enforceFixedRate && UnityEngine.Time.unscaledDeltaTime > TickDelta * 3f) slowFrames++;
+
             if (pendingSteps > 0)
             {
                 int n = pendingSteps;
@@ -216,10 +230,12 @@ namespace Tas
         /// </summary>
         void LateUpdate()
         {
+            CancelledFrame = cancelThisFrame;
             if (!cancelThisFrame) return;
             cancelThisFrame = false;
             if (mode != TasClockMode.Hold) return;
             TasSavestates.RestoreNewest();
+            CancelledFrame = false;
         }
 
         void Head()

@@ -1,3 +1,4 @@
+using System;
 using UnityEngine;
 
 namespace Tas
@@ -22,6 +23,23 @@ namespace Tas
         public static System.Func<TasInputFrame> LiveReader;
 
         public static bool SourcedFromTape;
+
+        /// <summary>
+        /// Optional: when the game has its own input struct (yours does - InputData via
+        /// InputManager.GetInputData()), replay should write THAT instead of only filling
+        /// TasInput.Current. Set it from the game-side adapter.
+        /// </summary>
+        public static System.Action<TasInputFrame> TapeApplier;
+
+        /// <summary>
+        /// Fired when the tape takes / gives back control. Your game-side adapter MUST use these to
+        /// switch InputManager off and on: if InputManager keeps polling the device in its Update, it
+        /// overwrites whatever the tape wrote (order of two scripts in the same Update batch) and the
+        /// replay silently fights the mouse. That is the single most likely "replay does nothing" bug.
+        /// </summary>
+        public static event Action TapeEngaged;
+        public static event Action TapeReleased;
+        static bool engaged;
         public static bool BlockLiveInput;       // true => player cannot touch the sim (playback/spectate)
 
         /// <summary>Called by TasClock at OnTickHead, before any sim code reads input.</summary>
@@ -30,6 +48,9 @@ namespace Tas
             if (SourcedFromTape)
             {
                 Current = Pending;
+                // push into the game's own input surface too, so code that bypasses TasInput
+                // (your controller reading InputManager directly) is driven by the tape as well
+                if (TapeApplier != null) TapeApplier(Current);
                 return;
             }
             if (LiveReader == null) { Current = default(TasInputFrame); return; }
@@ -42,11 +63,21 @@ namespace Tas
         {
             Pending = f;
             SourcedFromTape = true;
+            if (!engaged)
+            {
+                engaged = true;
+                if (TapeEngaged != null) TapeEngaged();
+            }
         }
 
         public static void ReleaseToLive()
         {
             SourcedFromTape = false;
+            if (engaged)
+            {
+                engaged = false;
+                if (TapeReleased != null) TapeReleased();
+            }
         }
 
         // ---- convenience readers for patched gameplay code ----------------

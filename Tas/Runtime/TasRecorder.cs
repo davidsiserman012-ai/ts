@@ -27,6 +27,7 @@ namespace Tas
 
         /// <summary>Wire these where you already call DemoRecorder, or leave them null.</summary>
         public static System.Func<bool> RaceModeProbe;
+        public static System.Func<uint> ExtraConfigProbe;   // game-side: control type, gravity, boosts...
         public System.Func<int> SpeedReader;          // () => (int)fpsChar.speed
 
         [Header("Refs (auto-found if null)")]
@@ -139,6 +140,7 @@ namespace Tas
             h = TasRng.Mix(h, Screen.width);
             h = TasRng.Mix(h, Application.version.GetHashCode());
             h = TasRng.Mix(h, Mathf.RoundToInt(TasLiveInput.lookSensitivity * 10000f));
+            if (ExtraConfigProbe != null) h = TasRng.Mix(h, unchecked((int)ExtraConfigProbe()));
             return h;
         }
 
@@ -207,6 +209,41 @@ namespace Tas
         }
 
         public string LastSavedPath { get; private set; }
+
+        /// <summary>
+        /// Stamp where the level actually ended. Needed because your demo stop is Olay_OyuncuDustu,
+        /// not Olay_LevelTamamlandi: the recording keeps running through the finish panel, the ad,
+        /// and the respawn. The tick the player crossed the line is a fact about the run, so the tool
+        /// records it and the export can trim to it instead of shipping the wandering.
+        /// </summary>
+        public void MarkFinish(string reason, int gameSeconds)
+        {
+            tape.header.finishTick = frames.Count;
+            tape.header.finishReason = reason;
+            tape.header.gameRunSeconds = gameSeconds;
+            if (m_timeManagerSecondsProbe != null) tape.header.gameRunSeconds = m_timeManagerSecondsProbe();
+            Debug.Log("[TAS] finish stamped at tick " + tape.header.finishTick + " (" + reason +
+                      ") gameSeconds=" + tape.header.gameRunSeconds);
+        }
+
+        static System.Func<int> m_timeManagerSecondsProbe;
+        public static void BindTimeManagerSeconds(System.Func<int> probe) { m_timeManagerSecondsProbe = probe; }
+
+        /// <summary>Trim the trunk to the stamped finish, so replay/leaderboard end at the line.</summary>
+        public bool TrimToFinish()
+        {
+            int f = tape.header.finishTick;
+            if (f <= 0 || f >= frames.Count) return false;
+            frames.RemoveRange(f, frames.Count - f);
+            for (int k = checkpoints.Count - 1; k >= 0; k--)
+                if (checkpoints[k].tick >= f) checkpoints.RemoveAt(k);
+            frameCount = frames.Count;
+            tape.frames = new List<TasInputFrame>(frames);
+            tape.checkpoints = new List<TasCheckpoint>(checkpoints);
+            tape.BuildIndex();
+            Debug.Log("[TAS] trimmed to finish tick " + f + " -> " + tape.Summary());
+            return true;
+        }
 
         public string SaveTape()
         {

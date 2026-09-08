@@ -54,6 +54,9 @@ namespace Tas
         public int controlType;
         public string mapname;
         public string rankStr;
+        public int finishTick = -1;         // where the level actually completed; tape may run past it
+        public string finishReason;         // "level" | "death" | "maxTicks" | "manual"
+        public int gameRunSeconds;          // GameManager's TimeManager.Seconds, for cross-checking
         public double runSeconds;
     }
 
@@ -69,7 +72,7 @@ namespace Tas
     /// </summary>
     public sealed class TasTape
     {
-        public const int FormatVersion = 1;
+        public const int FormatVersion = 2;   // v2 = 32-byte frames (4 aux analog channels)
         const uint Magic = 0x54534154;   // "TAST" little-endian
 
         public TasTapeHeader header = new TasTapeHeader();
@@ -116,6 +119,8 @@ namespace Tas
             w.Write(h.flagId); w.Write(h.avatarId); w.Write(h.knifeId);
             w.Write(h.capeId); w.Write(h.gloveId); w.Write(h.effectId);
             w.Write(h.rankIdx); w.Write(h.controlType);
+            w.Write(h.finishTick); w.Write(h.gameRunSeconds);
+            WriteStr(w, h.finishReason);
             w.Write(h.runSeconds);
 
             w.Write(tape.frames.Count);
@@ -158,6 +163,7 @@ namespace Tas
 
             int ver = r.ReadInt32();
             if (ver > FormatVersion) throw new InvalidDataException("tape version " + ver + " newer than reader " + FormatVersion);
+            bool legacy = ver < 2;
 
             TasTapeHeader h = tape.header;
             h.version = ver;
@@ -176,11 +182,16 @@ namespace Tas
             h.flagId = r.ReadInt32(); h.avatarId = r.ReadInt32(); h.knifeId = r.ReadInt32();
             h.capeId = r.ReadInt32(); h.gloveId = r.ReadInt32(); h.effectId = r.ReadInt32();
             h.rankIdx = r.ReadInt32(); h.controlType = r.ReadInt32();
+            if (!legacy)
+            {
+                h.finishTick = r.ReadInt32(); h.gameRunSeconds = r.ReadInt32();
+                h.finishReason = ReadStr(r);
+            }
             h.runSeconds = r.ReadDouble();
 
             int n = r.ReadInt32();
             tape.frames.Capacity = n;
-            for (int k = 0; k < n; k++) tape.frames.Add(TasInputFrame.Read(r));
+            for (int k = 0; k < n; k++) tape.frames.Add(legacy ? TasInputFrame.ReadLegacyV1(r) : TasInputFrame.Read(r));
 
             int cn = r.ReadInt32();
             for (int k = 0; k < cn; k++) tape.checkpoints.Add(TasCheckpoint.Read(r));

@@ -19,6 +19,8 @@ namespace Tas
         [Header("Auto capture")]
         public bool autoRecordOnGameStart = true;
         public bool autoStopOnMapFinish = true;
+        public bool trimToFinishTick = true;      // drop the post-finish wandering from the run
+        public bool rollbackOnDeath = false;      // opt-in: keep the session alive after a fall
         public bool autoReplayOnGameStart = false;   // THE replay toggle
         public TasPlaybackMode replayMode = TasPlaybackMode.ResimLive;
         public bool replayFromStartEveryTime = true;

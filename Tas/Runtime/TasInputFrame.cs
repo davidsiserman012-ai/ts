@@ -44,7 +44,7 @@ namespace Tas
     {
         public const int FP = 1000;              // fixed-point scale
         public const ushort PointerAbsent = ushort.MaxValue;
-        public const int Size = 24;              // keep in sync with Write/Read
+        public const int Size = 32;              // v2: 24 + four analog aux channels; keep in sync with Write/Read
 
         public uint buttons;
         public short moveX;                      // [-FP..FP]
@@ -89,6 +89,10 @@ namespace Tas
             w.Write(weaponSlot);
             w.Write(flags);
             w.Write(pad);
+            w.Write(auxA);
+            w.Write(auxB);
+            w.Write(auxC);
+            w.Write(auxD);
         }
 
         public static TasInputFrame Read(BinaryReader r)
@@ -105,8 +109,35 @@ namespace Tas
             f.weaponSlot = r.ReadByte();
             f.flags = r.ReadByte();
             f.pad = r.ReadByte();
+            f.auxA = r.ReadInt16();
+            f.auxB = r.ReadInt16();
+            f.auxC = r.ReadInt16();
+            f.auxD = r.ReadInt16();
             return f;
         }
+
+        /// <summary>Format v1 tapes: 24-byte records, no aux channels. Read-only support.</summary>
+        public static TasInputFrame ReadLegacyV1(BinaryReader r)
+        {
+            TasInputFrame f = new TasInputFrame();
+            f.buttons = r.ReadUInt32();
+            f.moveX = r.ReadInt16();
+            f.moveY = r.ReadInt16();
+            f.lookX = r.ReadInt32();
+            f.lookY = r.ReadInt32();
+            f.aimX = r.ReadUInt16();
+            f.aimY = r.ReadUInt16();
+            f.pointerCount = r.ReadByte();
+            f.weaponSlot = r.ReadByte();
+            f.flags = r.ReadByte();
+            f.pad = r.ReadByte();
+            return f;
+        }
+
+        public float AuxA { get { return auxA / (float)FP; } }
+        public float AuxB { get { return auxB / (float)FP; } }
+        public float AuxC { get { return auxC / (float)FP; } }
+        public float AuxD { get { return auxD / (float)FP; } }
 
         public static int FromFloat(float v)
         {

@@ -42,6 +42,9 @@ namespace Tas
         static readonly System.Collections.Generic.List<TasTickDriver> drivers =
             new System.Collections.Generic.List<TasTickDriver>(4);
 
+        /// <summary>Game-side hook: the bridge uses this to start the persistence freeze.</summary>
+        public event Action OnRecordStart;
+
         TasClock clock;
         TasRecorder recorder;
         TasPlayback playback;
@@ -177,6 +180,7 @@ namespace Tas
 
             if (cfg.autoRecordOnGameStart)
             {
+                if (OnRecordStart != null) OnRecordStart();
                 recorder.StartNewRecording();
                 session = TasSession.Recording;
                 statusLine = "RECORDING from game start (" + cfg.tickRate + "Hz, fixed-rate " +
@@ -192,6 +196,7 @@ namespace Tas
             if (session != TasSession.Recording) return;
             sessionReason = reason;
             TasTape t = recorder.EndRecording();
+            if (cfg.trimToFinishTick && t != null && t.header.finishTick > 0) recorder.TrimToFinish();
             session = TasSession.Finished;
             if (t != null && t.frames.Count > 0)
             {
@@ -498,6 +503,21 @@ namespace Tas
 
         /// <summary>Static entry points so you can wire the tool from anywhere, including before
         /// the first scene's objects exist. No-op if the tool is disabled in this build.</summary>
+        /// <summary>
+        /// Optional frame-exact finish stamp: call it from GameManager.Olay_LevelTamamlandi (the
+        /// moment b_levelTamamlandi is set), because OnLevelCompleted is raised 0.1 s later by an
+        /// Invoke and only after the fall. Without it the trim uses the fall-time tick, which is a
+        /// few ticks past the line - visible in the replay, invisible in the time.
+        /// </summary>
+        public static void NotifyFinishExact(string reason)
+        {
+            if (TasRecorder.i == null) return;
+            int secs = 0;
+            if (TasClock.Exists) secs = (int)(TasClock.Tick / TasClock.Rate);
+            TasRecorder.i.MarkFinish(reason, secs);
+            if (i != null) i.statusLine = "finish stamped @tick " + TasRecorder.i.TickCount + " (" + reason + ")";
+        }
+
         public static void NotifyGameStarted()
         {
             if (i != null) i.MarkGameStarted();

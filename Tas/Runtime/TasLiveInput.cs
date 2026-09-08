@@ -31,17 +31,42 @@ namespace Tas
 
         static Vector3 lastMouse;
         static bool haveLast;
+        static CursorLockMode lastLock = CursorLockMode.None;
+
+        /// <summary>Set by TasInputAdapter: the game's own sampler wins over this file's fallback.</summary>
+        public static System.Func<TasInputFrame> SampleOverride;
 
         public static void Install()
         {
             TasInput.LiveReader = Read;
             lastMouse = Input.mousePosition;
             haveLast = true;
+            lastLock = Cursor.lockState;
         }
 
         public static TasInputFrame Read()
         {
+            if (SampleOverride != null)
+            {
+                TasInputFrame g = SampleOverride();
+                if (Cursor.lockState != lastLock) { lastLock = Cursor.lockState; ResyncCursor(); }
+                return g;
+            }
+            return ReadFallback();
+        }
+
+        public static TasInputFrame ReadFallback()
+        {
             TasInputFrame f = new TasInputFrame();
+
+            // GameManager.Olay_OyuncuDustu / Olay_LevelTamamlandi do `Cursor.lockState = None`, and
+            // StartGame locks it again. Crossing either boundary without a resync records the cursor's
+            // jump back to centre as one enormous look delta - which then replays as a 180 degree snap.
+            if (Cursor.lockState != lastLock)
+            {
+                lastLock = Cursor.lockState;
+                ResyncCursor();
+            }
 
             Vector2 move = MoveReader != null ? MoveReader()
                                                : new Vector2(Input.GetAxisRaw("Horizontal"), Input.GetAxisRaw("Vertical"));
@@ -117,6 +142,7 @@ namespace Tas
         {
             lastMouse = Input.mousePosition;
             haveLast = true;
+            lastLock = Cursor.lockState;
         }
     }
 }

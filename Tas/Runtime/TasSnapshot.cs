@@ -61,6 +61,11 @@ namespace Tas
             if (!extras.Contains(s)) extras.Add(s);
         }
 
+        public static void Unregister(ITasSnapshotable s)
+        {
+            if (s != null) extras.Remove(s);
+        }
+
         public static void Clear() { bodies.Clear(); extras.Clear(); byTick.Clear(); lru.Clear(); }
 
         public static byte[] Capture()
