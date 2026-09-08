@@ -5,6 +5,10 @@ Native PC TAS tool + deterministic replay tapes for the game's leaderboard demos
 * [`Docs/TasToolPcGuide.md`](Docs/TasToolPcGuide.md) — **start here**: save states, slow-mo,
   auto-record on game start, the replay toggle, and how rollback branches are stitched into one
   continuous run. Quickstart is 3 steps and needs 2 lines wired into your existing code.
+* [`Docs/InstallInUnityProject.md`](Docs/InstallInUnityProject.md) — **putting it in your project**:
+  which folder each file goes in (the asmdef rule that trips everyone), the 3 edits to your code,
+  nothing-to-add-to-your-scene, how to check the install took, and how to ship a build where the tool
+  is compiled out instead of merely switched off.
 * [`Docs/TasGameManagerIntegration.md`](Docs/TasGameManagerIntegration.md) — the wiring for *this*
   codebase: `StartGame` / `Olay_OyuncuDustu` / `OnLevelCompleted`, the `InputManager` seam, what must
   go in a savestate, and the rollback-vs-economy exploit you have to close first.
@@ -19,6 +23,9 @@ Native PC TAS tool + deterministic replay tapes for the game's leaderboard demos
   `TasSuspend`) that live in Assembly-CSharp because they're the only things allowed to know about
   `GameManager`/`InputManager`/`Prefs`/`GameState`.
 
-Sentinel: `TasToolConfig.toolEnabled = false` makes the whole tool inert and invisible in a
-release build — no hotkeys, no panel, no capture, and no code path that a shipped client can be
-talked into driving.
+Two gates, deliberately different kinds:
+
+* `TasGate.Available` is **compile-time** (`TAS_TOOL` define, or `UNITY_EDITOR`/`DEVELOPMENT_BUILD`).
+  A release build without the define never boots `TasTool`, so there is no hotkey handler, no panel and
+  no input-injection path for a client to be talked into using.
+* `TasToolConfig.toolEnabled = false` is the runtime kill switch for a build that *does* have the tool.

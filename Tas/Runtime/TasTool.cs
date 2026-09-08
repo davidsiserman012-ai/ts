@@ -64,6 +64,8 @@ namespace Tas
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
         static void AutoBoot()
         {
+            // Constant-folded away in release builds, so the tool cannot be talked into existing there.
+            if (!TasGate.Available) return;
             if (i != null) { i.OnSceneReady(); return; }
             GameObject go = new GameObject("TasTool");
             DontDestroyOnLoad(go);
@@ -76,6 +78,7 @@ namespace Tas
 
         void Awake()
         {
+            if (!TasGate.Available) { enabled = false; return; }
             if (i != null && i != this) { Destroy(gameObject); return; }
             i = this;
             DontDestroyOnLoad(gameObject);

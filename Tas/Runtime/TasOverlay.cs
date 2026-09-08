@@ -71,9 +71,17 @@ namespace Tas
                           st == "idle" ? lbl : warn);
 
                 if (TasPlayback.i != null && (TasPlayback.i.divergences > 0 || TasPlayback.i.corrections > 0))
-                    GUI.Label(new Rect(20, 78, 280, 18), "desync " + TasPlayback.i.divergences +
+                    GUI.Label(new Rect(20, 78, 620, 18), "desync " + TasPlayback.i.divergences +
                               "  fixed " + TasPlayback.i.corrections +
                               "  err " + TasPlayback.i.lastError.ToString("0.00") + "m", warn);
+
+                // The two signals that mean "this replay is not your run" for a reason physics cannot
+                // see: input arriving off-tape, and the cursor pin slipping. Kept off the desync line on
+                // purpose - a desync says the sim moved, these say the *inputs* did not come from the tape.
+                if (TasPlayback.i != null && (TasPlayback.i.inputIntegrityErrors > 0 || TasPlayback.i.cursorMismatchTicks > 0))
+                    GUI.Label(new Rect(20, 96, 620, 18),
+                              "INPUT NOT IN TAPE " + TasPlayback.i.inputIntegrityErrors +
+                              "  CURSOR " + TasPlayback.i.cursorMismatchTicks + " - replay != run", warn);
             }
 
             if (!showInputBox) return;

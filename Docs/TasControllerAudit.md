@@ -49,7 +49,7 @@ value, which is exactly the state between "consumed" and "spent". This is why
 the proof, and the same reasoning is why the recorder re-samples at that point instead of reusing the
 head-committed value.
 
-## 3. `mouseLook` is a class field, so nothing else covers it
+## 3. `MouseLook` owns nothing worth snapshotting - the real hazard is the cursor lock
 
 `public MouseLook mouseLook = new MouseLook();` — a `[Serializable]` **class**, holding the pitch/yaw
 accumulators that `LookRotation()` reads and writes. A transform+rigidbody snapshot does not reach it.
@@ -104,8 +104,14 @@ Consequences, in order of severity:
   spacebar modify the "replayed" run, and it's an input path the tape never sees. Zero-edit
   mitigation already implemented: the bridge folds `Input.GetKey(Space)` and `SplitTouchControl.i.jump`
   into the recorded Jump bit, so nothing is silently *lost*. It can't stop the live key from adding
-  force during playback — for that, `TasPlayback.LiveSampler` counts it as `INPUT NOT IN TAPE` at that
-  tick and logs it, which is the honest behaviour: you get told instead of getting a wrong run.
+  force during playback — for that, `TasPlayback` probes the device at every feed and counts an
+  `INPUT NOT IN TAPE` tick, which is the honest behaviour: you get told instead of getting a wrong run.
+  That probe is `TasPlayback.LiveButtons` (`Func<uint>`, defaults to `TasLiveInput.PeekButtons()`), and
+  it only looks at `IntegrityMask` = Jump|Fire, i.e. the bits that apply force; holding W while watching
+  a replay is legal and stays quiet. It is deliberately a **button-only, pure** reader and not the
+  bridge's frame sampler: the frame sampler is fed the tape during replay (comparing it to the tape is
+  vacuously true) and `MouseDelta()` would consume the mouse delta the capture in `LateUpdate` still
+  needs, which would record zero look for a run that never had a look input problem.
 * `xvel`/`inputDataX` need **no** patch, since both derive from `inputData.left/right` — the tape's
   DirLeft/DirRight bits. Same for `input_y` from `fwd/bck`. They are recorded as integrity checks only.
 * `inputLastFrame` semantics: `lastBunnyFrame != inputLastFrame` only ever tests *inequality*, so any

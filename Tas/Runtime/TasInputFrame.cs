@@ -68,6 +68,21 @@ namespace Tas
         public byte flags;                       // TasFrameFlags
         public byte pad;                         // explicit padding -> stable binary layout
 
+        /// <summary>
+        /// The four analog channels a 24-byte v1 record had no room for, and that this game's movement
+        /// genuinely needs (all short at FP scale, same convention as `look`, so 24+8 = 32 = Size):
+        ///   auxA = inputDataX  - the strafe accumulator the controller carries between FixedUpdates
+        ///   auxB = xvel         - what inputDataX has accumulated INTO; not derivable from the input
+        ///   auxC = input_x      - the RESOLVED strafe the controller used, after tap/dynamic/uinput
+        ///   auxD = yy           - ditto for forward, and forced to 1 by Autowalk/Tap control types
+        /// C and D exist because GetInput() consults ButonManager.GetTapX() and SplitTouchControl.dt3,
+        /// neither of which is in InputData: recording only `input` would have left the physics fed by
+        /// an input the tape never saw. On replay the bridge writes them back into the controller
+        /// (TasUnityBridge.TryResolvedInput) so the run is reproduced instead of re-derived from a
+        /// touch queue that no longer holds anything.
+        /// </summary>
+        public short auxA, auxB, auxC, auxD;
+
         public float MoveXf { get { return moveX / (float)FP; } }
         public float MoveYf { get { return moveY / (float)FP; } }
         public float LookXf { get { return lookX / (float)FP; } }
@@ -85,6 +100,44 @@ namespace Tas
 
         public bool Has(TasButton b) { return (buttons & (uint)b) != 0u; }
         public void Set(TasButton b, bool on) { buttons = on ? (buttons | (uint)b) : (buttons & ~(uint)b); }
+
+        /// <summary>
+        /// THE fold. Every hash in the tool - live recorder hash, splice re-fold, playback hash,
+        /// tape-level FramesHash - must be this exact function in this exact order, or "desync 0"
+        /// means nothing. It used to be four hand-written copies with three different field sets, and
+        /// the recorder/checkpoint/playback comparisons could not match by construction.
+        ///
+        /// Input fields ONLY (including the resolved aux channels): positions are not in the tape, so
+        /// a hash that folded them could not be recomputed after a rollback or by a verifier holding
+        /// nothing but the file. State comparison lives in StateHash, one layer up.
+        /// </summary>
+        public uint Fold(uint h)
+        {
+            h = TasRng.Mix(h, (int)buttons);
+            h = TasRng.Mix(h, (int)((moveX << 16) | (moveY & 0xFFFF)));
+            h = TasRng.Mix(h, lookX);
+            h = TasRng.Mix(h, lookY);
+            h = TasRng.Mix(h, aimX | (aimY << 16));
+            h = TasRng.Mix(h, (int)weaponSlot | ((int)flags << 8));
+            h = TasRng.Mix(h, auxA);
+            h = TasRng.Mix(h, auxB);
+            h = TasRng.Mix(h, auxC);
+            h = TasRng.Mix(h, auxD);
+            return h;
+        }
+
+        /// <summary>
+        /// Input hash + the one piece of sim state the tool can always read on both sides. Recorded
+        /// into a checkpoint at capture time and rebuilt by playback at the same point of the same
+        /// tick, so a mismatch means the SIM diverged, not that two different formulas were used.
+        /// </summary>
+        public static uint StateHash(uint inputHash, Vector3 pos)
+        {
+            inputHash = TasRng.Mix(inputHash, pos.x);
+            inputHash = TasRng.Mix(inputHash, pos.y);
+            inputHash = TasRng.Mix(inputHash, pos.z);
+            return inputHash;
+        }
 
         public void Write(BinaryWriter w)
         {
@@ -203,5 +256,9 @@ namespace Tas
         Teleport = 1 << 0,     // authored/edited frame, not captured from live play
         Resynced = 1 << 1,     // playback corrected toward a checkpoint here
         Lagged = 1 << 2,       // capture was starved this tick (should never happen with a tick clock)
+        CursorUnlocked = 1 << 3,  // RotateView() returns early while unlocked, but lookAccum keeps
+                                  // accruing the gain: recorded run and replay can only agree if the
+                                  // cursor state is pinned, and this says when it was not.
+        NaNState = 1 << 4,        // position/rotation went non-finite: the run is void, not slow
     }
 }

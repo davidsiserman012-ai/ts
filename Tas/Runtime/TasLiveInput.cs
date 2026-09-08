@@ -55,6 +55,21 @@ namespace Tas
             return ReadFallback();
         }
 
+        /// <summary>
+        /// Buttons only, and PURE: no cursor resync, no MouseDelta(), because MouseDelta advances
+        /// lastMouse/haveLast and ResyncCursor writes state - an input *probe* that consumes the mouse
+        /// delta would take the delta away from the capture that is happening in the same frame, and the
+        /// run would be recorded with zero look for no visible reason. This is the reader a checker
+        /// should use; anything that needs look/aux must go through Read(), once, as the capture.
+        /// </summary>
+        public static uint PeekButtons()
+        {
+            if (ButtonReader != null) return ButtonReader();
+            TasInputFrame f = new TasInputFrame();
+            ReadDefaultButtons(ref f);
+            return f.buttons;
+        }
+
         public static TasInputFrame ReadFallback()
         {
             TasInputFrame f = new TasInputFrame();

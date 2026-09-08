@@ -52,13 +52,34 @@ namespace Tas
         public Camera rigCam;
 
         /// <summary>
-        /// Game-side sampler used to sanity-check the tape against the device during playback.
-        /// If input is reaching the sim from a path the tape never recorded (a direct
-        /// Input.GetButton in the controller, a touch handler that bypasses InputData), the run
-        /// still LOOKS like it replays fine and quietly isn't yours. This is how you find out on
-        /// tick 40 instead of on the leaderboard.
+        /// What the DEVICE is holding right now, during playback. If input reaches the sim from a path
+        /// the tape never recorded (a direct Input.GetButton in the controller, a touch handler that
+        /// writes physics state), the run still LOOKS like it replays fine and quietly isn't yours - so
+        /// the tape is compared against a live read at every feed and a mismatch is reported on tick 40
+        /// instead of on the leaderboard. Null means use TasLiveInput.PeekButtons(), which is pure
+        /// (no cursor resync, no mouse-delta consumption). A game-side reader must be pure too, and must
+        /// NOT be the frame sampler the capture uses: during replay that one returns the tape-fed struct,
+        /// and comparing it to the tape is vacuously true - it would always pass.
         /// </summary>
-        public static System.Func<TasInputFrame> LiveSampler;
+        public static System.Func<uint> LiveButtons;
+
+        /// <summary>The bits the check looks at, and only these (movement keys during a replay are legal).</summary>
+        public static uint IntegrityMask = (uint)(TasButton.Jump | TasButton.Fire);
+
+        /// <summary>false to stop probing the device during playback (one Input read per tick saved).</summary>
+        public bool checkOffTapeInput = true;
+
+        /// <summary>
+        /// Game-side "is the cursor currently unlocked" probe, wired by TasUnityBridge. Needed because a
+        /// frame recorded with the cursor free is a DIFFERENT frame than the same input with it locked
+        /// (RotateView early-returns, so the turn is skipped while lookAccum still accrues), and the
+        /// tool pins the cursor for you - so if the pin ever slips, the tape's per-frame
+        /// TasFrameFlags.CursorUnlocked says what actually happened and this compares against it.
+        /// </summary>
+        public static System.Func<bool> CursorUnlockedProbe;
+        public int cursorMismatchTicks;
+        int cursorMismatchLogged;
+
         public int inputIntegrityErrors;
         int integrityLogged;
 
@@ -99,6 +120,8 @@ namespace Tas
             playing = true;
             index = Mathf.Clamp(fromTick, 0, length - 1);
             divergences = 0; corrections = 0; liveHash = 2166136261u;
+            inputIntegrityErrors = 0; integrityLogged = 0;
+            cursorMismatchTicks = 0; cursorMismatchLogged = 0;
 
             if (m == TasPlaybackMode.ResimVerify) TasClock.i.ResetClock();
             TasClock.i.paused = false;
@@ -206,7 +229,62 @@ namespace Tas
 
         void Feed(int i0)
         {
-            TasInput.PushFromTape(tape.frames[i0]);
+            TasInputFrame t = tape.frames[i0];
+            TasInput.PushFromTape(t);
+            bool pinLocked = false;
+
+            // Does the DEVICE have something the tape does not? That is the shape of every "the replay
+            // looked perfect but wasn't mine" bug: a direct Input.GetButton inside the sim, a touch
+            // handler that writes physics state, a UI callback. Comparing look/aux here would fire on
+            // every frame of a legitimate session (you are allowed to move the mouse while watching), so
+            // it is held-button bits only, and only in the off-tape direction.
+            if (checkOffTapeInput && !TasClock.CancelledFrame)
+            {
+                uint live = LiveButtons != null ? LiveButtons() : TasLiveInput.PeekButtons();
+                // IntegrityMask is the force-applying buttons on purpose: watching a replay with your hand on
+                // W is legal and harmless - the sim is being fed the tape - so flagging that would be
+                // noise. A device-held JUMP/FIRE is different: those are exactly the bits that their
+                // controller adds to jump force from a direct Input.GetButton, i.e. the one path where a
+                // key on your keyboard really does change a "replayed" run.
+                if ((pinLocked = ((t.flags & (byte)TasFrameFlags.CursorUnlocked) != 0)) !=
+                    (CursorUnlockedProbe != null && CursorUnlockedProbe()))
+                {
+                    cursorMismatchTicks++;
+                    if (cursorMismatchLogged < 3)
+                    {
+                        cursorMismatchLogged++;
+                        Debug.LogWarning("[TAS] cursor lock state at tick " + i0 + " is " +
+                            ((t.flags & (byte)TasFrameFlags.CursorUnlocked) != 0 ? "UNLOCKED in the tape, locked now"
+                                                                                  : "locked in the tape, UNLOCKED now") +
+                            ". Turning (and therefore the bhop turn-boost) is skipped while unlocked, so this " +
+                            "replay cannot match the run - the tool pins the cursor while a session owns it, " +
+                            "and something released or re-took it (Escape via InputManager.KeyboardSupport, a " +
+                            "pause menu, or your own SetCursorState call).");
+                    }
+                }
+
+                uint extra = live & IntegrityMask & ~t.buttons;
+                if (extra != 0u)
+                {
+                    inputIntegrityErrors++;
+                    if (integrityLogged < 8)
+                    {
+                        integrityLogged++;
+                        Debug.LogWarning("[TAS] INPUT NOT IN TAPE at tick " + i0 + ": device holds " +
+                                         TasButtonNames(extra) + " that frame does not. Something is reading " +
+                                         "the keyboard inside the sim (see Docs/TasControllerAudit.md - the " +
+                                         "Input.GetButton(\"Jump\") lines) - this replay is not the tape.");
+                    }
+                }
+            }
+        }
+
+        static string TasButtonNames(uint bits)
+        {
+            string s = null;
+            foreach (TasButton b in System.Enum.GetValues(typeof(TasButton)))
+                if ((bits & (uint)b) != 0u) s = (s == null ? "" : s + "|") + b;
+            return s != null ? s : "0x" + bits.ToString("X8");
         }
 
         void OnTail()
@@ -214,29 +292,22 @@ namespace Tas
             if (tape == null || length == 0 || index >= length) return;
 
             TasInputFrame f = tape.frames[index];
-            liveHash = TasRng.Mix(liveHash, f.lookX);
-            liveHash = TasRng.Mix(liveHash, f.aimX | (f.aimY << 16));
-            liveHash = TasRng.Mix(liveHash, f.buttons);
+            liveHash = f.Fold(liveHash);                                  // the same one function
             Transform p = TasRecorder.i != null ? TasRecorder.i.player : null;
-            if (p != null)
-            {
-                liveHash = TasRng.Mix(liveHash, p.position.x);
-                liveHash = TasRng.Mix(liveHash, p.position.y);
-                liveHash = TasRng.Mix(liveHash, p.position.z);
-            }
+            uint simHash = TasInputFrame.StateHash(liveHash, p != null ? p.position : Vector3.zero);
 
             TasCheckpoint c;
             if (byTick != null && byTick.TryGetValue(index, out c))
             {
                 float err = p != null ? Vector3.Distance(p.position, c.Position) : 0f;
                 lastError = err;
-                if (err > posTolerance || (c.stateHash != 0u && c.stateHash != liveHash))
+                if (err > posTolerance || (c.stateHash != 0u && c.stateHash != simHash))
                 {
                     divergences++;
                     if (mode == TasPlaybackMode.ResimVerify)
                     {
                         Debug.LogWarning("[TAS] DIVERGENCE tick=" + index + " err=" + err.ToString("0.000") +
-                                         " hashTape=" + c.stateHash.ToString("X8") + " hashSim=" + liveHash.ToString("X8"));
+                                         " hashTape=" + c.stateHash.ToString("X8") + " hashSim=" + simHash.ToString("X8"));
                     }
                     else if (mode == TasPlaybackMode.ResimLive && err > posTolerance)
                     {
@@ -287,6 +358,8 @@ namespace Tas
                        TasRecorder.ComputeConfigHash().ToString("X8") + "): gravity/fixedDeltaTime/sensitivity changed";
             if (tape.header.tickRate < 10 || tape.header.tickRate > 1000)
                 return "implausible tickRate " + tape.header.tickRate;
+            string extra = TasRecorder.Validate(tape);
+            if (extra != null) return extra;
             return null;
         }
 

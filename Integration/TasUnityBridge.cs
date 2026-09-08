@@ -75,9 +75,6 @@ namespace UnityTAS
         /// `Mathf.Abs(Time.timeScale) < float.Epsilon`, which is why the tool must never freeze the
         /// world with timeScale: see Docs/TasControllerAudit.md.)
         /// </summary>
-        static CursorLockMode prevLock = CursorLockMode.Locked;
-        static bool prevVisible;
-        static bool locking;
 
         public static void Bind(GameManager gm)
         {
@@ -91,11 +88,14 @@ namespace UnityTAS
                 BuildInputData(f);                      // write immediately: InputManager may not tick this frame
                 LockCursorForReplay(true);
             };
+            // pin it while RECORDING too, or the run's own definition of "can I turn" is unstable
+            TasTool tool = TasTool.i;
+            if (tool != null) tool.OnRecordStart += delegate { LockCursorForReplay(true); };
             TasInput.TapeEngaged += delegate { TasUnityBridge.ResetTransient(); PinScreenInch(LastTapeInch()); };
             TasInput.TapeReleased += delegate
             {
                 TasInputBus.Disengage();
-                LockCursorForReplay(false);
+                if (TasTool.i == null || TasTool.i.session != TasSession.Recording) LockCursorForReplay(false);
                 RestoreScreenInch();
                 TasUnityBridge.ResetTransient();
             };
@@ -103,7 +103,13 @@ namespace UnityTAS
             // anything reading InputData directly (not through GetInputData) must be served too
             if (gm != null && gm.m_playerController != null) gm.m_playerController.inputData = im.input;
 
-            TasPlayback.LiveSampler = SampleFromController;
+            // No LiveSampler wiring on purpose: playback's off-tape check needs a PURE device read, and
+            // this bridge's sampler is the capture path (during replay it returns the tape-fed struct, so
+            // the comparison would be vacuously true). TasPlayback falls back to TasLiveInput
+            // PeekButtons(), which reads only the buttons and consumes nothing.
+            TasPlayback.CursorUnlockedProbe = CursorUnlocked;
+            TasRecorder.TapeValidator = ValidateTape;
+            TasRecorder.HeaderProbe = FillHeader;
             Debug.Log("[TAS] bridge bound | InputData is a struct (safe copies), screenInch=" +
                       im.screenInch.ToString("0.000") + ", resolvedOverride=" + OverrideResolvedInput);
         }
@@ -117,6 +123,12 @@ namespace UnityTAS
         /// </summary>
         public static TasInputFrame SampleFromController()
         {
+            // Tick-exact cursor policy for the recording path: pinning here happens on the same tick the
+            // CursorUnlocked flag below is stamped, so the pin and the tape can never disagree by a
+            // frame. Replay is pinned by TasGameBridge.Update (its sampler is device-only now) and
+            // released there too, since that is the only place that sees a session END by any path.
+            if (pinCursor && !locking) LockCursorForReplay(true);
+
             InputManager im = IM;
             if (im == null) return default(TasInputFrame);
 
@@ -139,13 +151,21 @@ namespace UnityTAS
                 // Only fields this controller is proven to read (jump, dt3) - no guessing at the rest
                 // of your touch layer, because a guessed field either fails to compile or, worse,
                 // records a value the sim never used.
+                // ControlTypesManager.DisableAll() does SetActive(false) on the whole
+                // SplitTouchControl GameObject, and nothing zeroes dt3/jump on the way out. So for
+                // Standart/Autowalk that object is INACTIVE with whatever the last touch left in it,
+                // and GetInput() reads that stale value every tick. Fold it in only while it is live;
+                // the stale case is recorded through the controller's resolved aux channels anyway,
+                // which is what makes a replay of a run made in that state reproduce it exactly.
                 SplitTouchControl st = SplitTouchControl.i;
-                if (st != null)
+                if (st != null && st.isActiveAndEnabled)
                 {
                     if (st.jump) f.Set(TasButton.Jump, true);
                     f.moveX = TasInputFrame.FromFloat(Mathf.Clamp(st.dt3.x * 10f, -1f, 1f));
                     f.moveY = TasInputFrame.FromFloat(Mathf.Clamp(st.dt3.y * 5f, -1f, 1f));
                 }
+
+                if (CursorUnlocked) f.flags |= (byte)TasFrameFlags.CursorUnlocked;
             }
             return f;
         }
@@ -254,67 +274,96 @@ namespace UnityTAS
 
         // ------------------------------------------------------------------ savestates for this controller
 
+        // ------------------------------------------------------------------ MouseLook: nothing to snapshot
+        //
+        // I warned you last round that MouseLook's private accumulators would reset your aim on
+        // rollback. Your version does not have that problem, and the reason is in LookRotation():
+        //
+        //     float yRot = mouse_x * XSensitivity;
+        //     character.localRotation = character.localRotation * Quaternion.Euler(0, yRot, 0);
+        //
+        // It reads the CURRENT localRotation and multiplies, instead of accumulating into
+        // m_CharacterTargetRot like the stock asset. So the rotation lives in the transforms, which
+        // the ring snapshot already restores, and mouse_x/mouse_y are per-frame inputs that the
+        // controller overwrites before every use. No snapshot needed, no reflection, no link.xml.
+        // m_CharacterTargetRot / m_CameraTargetRot are written by Init/SetLook and read by nobody:
+        // dead state. And smooth/smoothTime are never consulted, so there is no smoothing to desync.
+        //
+        // What DOES matter in this file is documented in Docs/TasControllerAudit.md §3: the clamp
+        // divides by q.w, so if MinimumX/MaximumX are ever widened past +-90 the camera can produce
+        // NaN, and XSensitivity/YSensitivity/clampVerticalRotation/MinimumX/MaximumX are physics.
+        static void SaveLook(object ml, BinaryWriter w) { w.Write(0); }        // intentionally empty
+        static void LoadLook(object ml, BinaryReader r) { if (r.ReadInt32() != 0) r.ReadSingle(); r.ReadSingle(); }
+
         /// <summary>
-        /// MouseLook is a [Serializable] CLASS field on the controller, so nothing in the transform or
-        /// rigidbody snapshot covers its internal yaw/pitch accumulators. Restore the transforms without
-        /// restoring those and the next RotateView recomputes rotation from stale state - which is the
-        /// "savestate resets my aim" bug every Unity rollback tool gets. Fields are found by name
-        /// because your MouseLook is modified (it has public mouse_x/mouse_y), and the two rotation
-        /// accumulators are read/written by reflection so this file still works if they are private.
-        /// ⚠ send MouseLook.cs and this becomes 4 direct field reads.
+        /// `RotateView()` early-returns whenever the cursor is unlocked, but `Update()` still does
+        /// `lookAccum += Mathf.Abs(inputData.look_x)` - so an unlocked cursor means "no turning, but
+        /// the look-derived bunny gain keeps accruing". That is an exploit surface AND a tape poison:
+        /// a run recorded with the cursor unlocked replays differently once it is locked. Pin it for
+        /// the whole session (record and replay) and stamp the flag per tick so a mismatch is
+        /// explainable rather than mysterious. Escape unlocks it via InputManager.KeyboardSupport.
         /// </summary>
-        static readonly string[] LookFieldCandidates =
-        {
-            "m_XRotation", "m_YRotation", "m_xRotation", "m_yRotation",
-            "xRotation", "yRotation", "m_RotationX", "m_RotationY"
-        };
+        public static bool pinCursor = true;
 
-        static FieldInfo[] lookFields;
-        static bool lookFieldsSearched;
-        static readonly Dictionary<object, float[]> lookPrev = new Dictionary<object, float[]>(ReferenceComparer<object>.Instance);
+        public static bool CursorUnlocked { get { return Cursor.lockState != CursorLockMode.Locked; } }
 
-        static void EnsureLookFields(object ml)
+        /// <summary>True while the session owns the cursor. Read by TasGameBridge's release path.</summary>
+        public static bool IsCursorPinned { get { return locking; } }
+
+        public static void LockCursorForReplay(bool on)
         {
-            if (lookFieldsSearched) return;
-            lookFieldsSearched = true;
-            if (ml == null) return;
-            var list = new List<FieldInfo>(2);
-            Type t = ml.GetType();
-            while (t != null && list.Count < 2)
+            if (!pinCursor) return;
+            if (on && !locking)
             {
-                foreach (string name in LookFieldCandidates)
-                {
-                    if (list.Count >= 2) break;
-                    FieldInfo fi = t.GetField(name, BindingFlags.Instance | BindingFlags.Public |
-                                                          BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
-                    if (fi != null && fi.FieldType == typeof(float) && !list.Contains(fi)) list.Add(fi);
-                }
-                t = t.BaseType;
+                locking = true;
+                prevLock = Cursor.lockState;
+                prevVisible = Cursor.visible;
+                Cursor.lockState = CursorLockMode.Locked;
+                Cursor.visible = false;
             }
-            lookFields = list.Count == 2 ? list.ToArray() : null;
-            if (lookFields == null)
-                Debug.LogWarning("[TAS] MouseLook rotation fields not found on " + ml.GetType().Name +
-                                 " - rollback will reset aim. Send MouseLook.cs, or add " +
-                                 "public float TasX, TasY mirrored in LookRotation().");
+            else if (!on && locking)
+            {
+                locking = false;
+                Cursor.lockState = prevLock;
+                Cursor.visible = prevVisible;
+            }
         }
 
-        public static void SaveLook(object ml, BinaryWriter w)
+        /// <summary>
+        /// Control type and sensitivity are read once per run (Reload) and once per tick (gain)
+        /// respectively, so a tape is only meaningful against them. Refuse with a real message rather
+        /// than letting configHash say "X8 != Y8".
+        /// </summary>
+        public static string ValidateTape(TasTape t)
         {
-            if (ml == null) { w.Write(0); return; }
-            EnsureLookFields(ml);
-            if (lookFields == null) { w.Write(0); return; }
-            w.Write(1);
-            w.Write((float)lookFields[0].GetValue(ml));
-            w.Write((float)lookFields[1].GetValue(ml));
-        }
+            if (t == null) return "no tape";
 
-        public static void LoadLook(object ml, BinaryReader r)
-        {
-            if (r.ReadInt32() == 0) { if (ml != null) { /* no state known: re-sync from the restored body */ } return; }
-            float a = r.ReadSingle(), b = r.ReadSingle();
-            if (ml == null || lookFields == null) return;
-            lookFields[0].SetValue(ml, a);
-            lookFields[1].SetValue(ml, b);
+            // ControlTypesManager.Reload() reads Prefs.ControlType ONCE per run, but GetInput() reads
+            // GameState.ControlTypeCache EVERY tick and Autowalk/Tap force yy = 1f. So a tape recorded
+            // in Tap mode replayed under Standart is a different game, not a different player.
+            if (t.header.controlType >= 0 && (int)Prefs.ControlType != t.header.controlType)
+                return "control type mismatch: tape was " + (ControlTypes)t.header.controlType +
+                       ", this build is " + Prefs.ControlType +
+                       " (Reload() only reads it at run start, so switch it and start a fresh run)";
+
+            // MouseLook's clamp divides by q.w: if MinimumX/MaximumX were widened past +-90 on this
+            // prefab, pitch can hit NaN and every tape recorded before that edit is void.
+            RigidbodyFirstPersonController cc = C;
+            if (cc != null && cc.mouseLook != null &&
+                (cc.mouseLook.MinimumX < -90f || cc.mouseLook.MaximumX > 90f))
+                return "MouseLook clamp is outside +-90 (" + cc.mouseLook.MinimumX + ".." + cc.mouseLook.MaximumX +
+                       "), ClampRotationAroundXAxis divides by q.w -> NaN risk; tapes are not trustworthy";
+
+            InputManager im = IM;
+            if (im != null && t.header.screenInch > 0f && !Mathf.Approximately(t.header.screenInch, im.screenInch))
+                TasUnityBridge.PinScreenInch(t.header.screenInch);   // replay-safe: the header wins
+            // dbg_sens is written every RotateView, so the LAST recorded tick carries the sensitivity
+            // the run actually used - better than trusting a header number if it changed mid-run.
+            if (cc != null && cc.dbg_sens > 0f && !Mathf.Approximately(cc.dbg_sens, Prefs.Sensivity))
+                Debug.Log("[TAS] note: the controller's last observed sensitivity was " + cc.dbg_sens.ToString("0.###") +
+                          ", this build's Prefs.Sensivity is " + Prefs.Sensivity.ToString("0.###") +
+                          ". configHash is what refuses a mismatched tape; this is just so you can see it.");
+            return null;
         }
 
         /// <summary>
@@ -472,23 +521,6 @@ namespace UnityTAS
             TasLiveInput.ResyncCursor();
         }
 
-        static void LockCursorForReplay(bool on)
-        {
-            if (on && !locking)
-            {
-                locking = true;
-                prevLock = Cursor.lockState;
-                prevVisible = Cursor.visible;
-                Cursor.lockState = CursorLockMode.Locked;
-                Cursor.visible = false;
-            }
-            else if (!on && locking)
-            {
-                locking = false;
-                Cursor.lockState = prevLock;
-                Cursor.visible = prevVisible;
-            }
-        }
 
         /// <summary>
         /// Everything in this controller's maths that is not in the tape. A run recorded with
@@ -496,12 +528,44 @@ namespace UnityTAS
         /// sensMultiplier = 1f` means the PLATFORM is part of the physics, as is the
         /// `if (sens &lt; 1f)` branch that scales the strafe/look gain but not the turn.
         /// </summary>
+        /// <summary>
+        /// The identity half of a tape. Same fields your DemoRecorder.ReloadPlayerData fills, because a
+        /// tape that cannot say map + nick + rank + cosmetics cannot be matched to a leaderboard entry -
+        /// and because mapname is what mapHash is taken over, an empty mapname would hash every map alike.
+        /// Called at recording start AND at save, so a late-joining player name still lands.
+        /// </summary>
+        static void FillHeader(TasTapeHeader h)
+        {
+            // ⚠ MEMBER NAMES BELOW are from your DemoRecorder.ReloadPlayerData, which I have not read -
+            // they are the one part of this file that can fail to compile for naming reasons rather than
+            // design reasons. If a line is red, it is a name fix, not a structural problem: the tape is
+            // valid without them, it just loses its identity.
+            h.mapname = MapIsimHelpers.ServerMapIsimGetir();
+            h.nick = Prefs.ServerNick;
+            h.flagId = Prefs.SelectedFlag;
+            h.avatarId = Prefs.SelectedAvatar;
+            h.knifeId = InventoryHelpers.aktifBicak;
+            h.capeId = InventoryHelpers.aktifCape;
+            h.gloveId = InventoryHelpers.aktifEldiven;
+            h.effectId = InventoryHelpers.aktifPlayerEffect;
+            h.rankStr = GameManagerHelpers.RankBelirle();
+            h.rankIdx = GameManagerHelpers.RankIndexBul(h.rankStr);
+            h.controlType = (int)Prefs.ControlType;
+            h.controlTypeStr = Prefs.ControlType.ToString();
+            GameManager gm = TasGameBridge.i != null ? TasGameBridge.i.Manager : null;
+            if (gm != null && gm.m_TimeManager != null) h.gameRunSeconds = gm.m_TimeManager.Seconds;
+        }
+
         public static uint ConfigExtras()
         {
             uint h = 2166136261u;
             h = TasRng.Mix(h, Prefs.Sensivity);
             h = TasRng.Mix(h, Mathf.RoundToInt(CurrentScreenInch * 10000f));
+            // Both, deliberately: GameState.ControlTypeCache is what the physics reads THIS tick, while
+            // Prefs.ControlType is what the NEXT ControlTypesManager.Reload() will install. They differ
+            // exactly when a control-type change is pending, and that change is a run-semantics change.
             h = TasRng.Mix(h, (int)GameState.ControlTypeCache);
+            h = TasRng.Mix(h, (int)Prefs.ControlType);
             h = TasRng.Mix(h, Application.isMobilePlatform ? 1 : 2);
             h = TasRng.Mix(h, (int)Application.platform);
             h = TasRng.Mix(h, LevelFizik.MaxHizYDisabled ? 4 : 0);
@@ -530,6 +594,18 @@ namespace UnityTAS
                 h = TasRng.Mix(h, c.advancedSettings.shellOffset);
                 h = TasRng.Mix(h, c.advancedSettings.airControl ? 1 : 0);
                 h = TasRng.Mix(h, RigidbodyFirstPersonController.analog_bunny_mult);
+
+                // MouseLook: these five are consulted every tick by LookRotation/ClampRotation.
+                // (smooth/smoothTime and the two target quaternions are not, so they are not hashed.)
+                MouseLook ml = c.mouseLook;
+                if (ml != null)
+                {
+                    h = TasRng.Mix(h, ml.XSensitivity);
+                    h = TasRng.Mix(h, ml.YSensitivity);
+                    h = TasRng.Mix(h, ml.MinimumX);
+                    h = TasRng.Mix(h, ml.MaximumX);
+                    h = TasRng.Mix(h, ml.clampVerticalRotation ? 16 : 0);
+                }
             }
             return h;
         }

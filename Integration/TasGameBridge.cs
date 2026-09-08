@@ -157,6 +157,17 @@ public sealed class TasGameBridge : MonoBehaviour
 
     void Update()
     {
+        // Cursor policy, on every frame rather than on the 0.05 s poll below. RotateView() skips the
+        // turn while the cursor is free but still accrues lookAccum, so even a few unlocked frames
+        // change what a run means; the per-tick pin in TasUnityBridge keeps a session exact, this one
+        // covers the gap before its first tick and releases the lock when the session is over - via any
+        // path, including ones the tool does not own (map finished, death, F11, a refused record).
+        TasSession sess = TasTool.i != null ? TasTool.i.session : TasSession.Booted;
+        if (sess == TasSession.Recording || sess == TasSession.Replaying)
+            TasUnityBridge.LockCursorForReplay(true);
+        else if (TasUnityBridge.IsCursorPinned)
+            TasUnityBridge.LockCursorForReplay(false);
+
         if (gm == null) { TryBind(); return; }
         if (Time.unscaledTime - lastPoll < 0.05f) return;
         lastPoll = Time.unscaledTime;

@@ -29,8 +29,21 @@ namespace Tas
         public static System.Func<bool> RaceModeProbe;
         public static System.Func<uint> ExtraConfigProbe;   // game-side: control type, gravity, boosts...
 
-        /// <summary>
-        /// Game-side hooks for values that change what a tick MEANS but that this assembly must not
+        /// <summary>Extra refusal reasons the game layer knows about and this assembly must not guess:
+        /// control type, MouseLook clamp range, ... Shown verbatim in the UI, which is why this returns a
+        /// string and not a bool: "wrong build" is useless, "tape was recorded in Tap mode" is fixable.
+        /// Consulted when a tape is armed, so it must stay cheap - per tape, never per tick.</summary>
+        /// <summary>Fills the identity fields this assembly must not name (map, nick, cosmetics, rank,
+        /// control type). Called from ReloadPlayerData BEFORE mapHash/configHash are computed, so a
+        /// header that says "dust2" and a hash of "" can never happen: the same call that labels the run
+        /// is the one that is hashed against. Leave null and the tape still plays - it is just anonymous,
+        /// which is fine for personal rollback and useless for a leaderboard.</summary>
+        public static System.Action<TasTapeHeader> HeaderProbe;
+
+        public static System.Func<TasTape, string> TapeValidator;
+        public static string Validate(TasTape t) { return TapeValidator != null ? TapeValidator(t) : null; }
+
+        /// <summary>Game-side hooks for values that change what a tick MEANS but that this assembly must not
         /// know about. InputManager.screenInch is one: your touch movement is
         /// screenInch * (delta/Screen.width) * 3, so the same swipe means a different speed on a
         /// different display. Record it, hash it, and pin it during replay so a run made on your dev
@@ -63,6 +76,7 @@ namespace Tas
         public int frameCount;
         public int speed;
         public uint liveHash = 2166136261u;
+        public int badFrames;
 
         readonly List<TasInputFrame> frames = new List<TasInputFrame>(8192);
         readonly List<TasCheckpoint> checkpoints = new List<TasCheckpoint>(256);
@@ -123,14 +137,7 @@ namespace Tas
         public void ReloadPlayerData()
         {
             TasTapeHeader h = tape.header;
-            // ⚠ same fields your DemoRecorder.ReloadPlayerData() fills:
-            // h.mapname = MapIsimHelpers.ServerMapIsimGetir();
-            // h.nick = Prefs.ServerNick;
-            // h.flagId = Prefs.SelectedFlag;  h.avatarId = Prefs.SelectedAvatar;
-            // h.knifeId = InventoryHelpers.aktifBicak; h.capeId = InventoryHelpers.aktifCape;
-            // h.gloveId = InventoryHelpers.aktifEldiven; h.effectId = InventoryHelpers.aktifPlayerEffect;
-            // h.rankStr = GameManagerHelpers.RankBelirle();
-            // h.rankIdx = GameManagerHelpers.RankIndexBul(h.rankStr);
+            if (HeaderProbe != null) { try { HeaderProbe(h); } catch (Exception e) { Debug.LogWarning("[TAS] HeaderProbe threw, tape keeps whatever identity it had: " + e.Message); } }
             h.gameVersion = Application.version;
             h.screenInch = ScreenInchProbe != null ? ScreenInchProbe() : 0f;
             h.mapHash = TasTape.HashOf(h.mapname);
@@ -194,6 +201,7 @@ namespace Tas
             frames.Capacity = Mathf.Max(frames.Capacity, Mathf.Min(maxTicks, 1 << 16));
             frameCount = 0;
             endedByCap = false;
+            badFrames = 0;
 
             ReloadPlayerData();
 
@@ -294,6 +302,15 @@ namespace Tas
             // Fresh read at the capture point, not TasInput.Current (that was committed at tick head,
             // before your controller consumed this frame's input). See TasClock.RunCaptures.
             TasInputFrame f = TasInput.SampleLiveNow();
+
+            // NaN is not a slow frame, it is the end of the run. MouseLook's clamp divides by q.w, and
+            // any non-finite value that reaches the fold at the end of FixedUpdate keeps propagating, so
+            // stop at the first one and name the tick rather than shipping a fly-through-the-floor tape.
+            // Order matters: `frames` is a List of STRUCTS, so the flag must be set BEFORE Add, or it
+            // only mutates the local copy and the tape loses the marker.
+            bool nonFinite = player != null &&
+                (!IsFinite(player.position.x) || !IsFinite(player.position.y) || !IsFinite(player.position.z));
+            if (nonFinite) f.flags |= (byte)TasFrameFlags.NaNState;
             if (frames.Count > 0)
             {
                 TasInputFrame p = frames[frames.Count - 1];
@@ -306,16 +323,19 @@ namespace Tas
             frames.Add(f);
             frameCount = frames.Count;
 
-            liveHash = TasRng.Mix(liveHash, f.buttons);
-            liveHash = TasRng.Mix(liveHash, f.lookX);
-            liveHash = TasRng.Mix(liveHash, f.aimX | (f.aimY << 16));
-            if (player != null)
-            {
-                liveHash = TasRng.Mix(liveHash, player.position.x);
-                liveHash = TasRng.Mix(liveHash, player.position.y);
-                liveHash = TasRng.Mix(liveHash, player.position.z);
-            }
+            liveHash = f.Fold(liveHash);        // input only, same function as playback + splice
             TasSim.Accumulator = liveHash;
+
+            if (nonFinite)
+            {
+                badFrames++;
+                if (badFrames == 1 || (badFrames % 30) == 0)
+                    Debug.LogError("[TAS] NON-FINITE player position at tick " + frames.Count + " (" +
+                                   player.position + ") - this run is void. Usual cause: MouseLook.MinimumX/" +
+                                   "MaximumX widened past +-90 so ClampRotationAroundXAxis divided by q.w==0, " +
+                                   "or a velocity clamp was handed a NaN. Fix it or accept the tape is dead.");
+                if (badFrames >= 3) { TasTool.NotifyMapFinished("non-finite state"); return; }
+            }
 
             int period = Mathf.Max(1, checkpointEvery);
             if (frames.Count == 1 || ((frames.Count - 1) % period) == 0)
@@ -326,6 +346,8 @@ namespace Tas
             // after the hash/checkpoint bookkeeping so a restored snapshot lands mid-run correctly
             if (savestateEveryTick) TasSavestates.Push();
         }
+
+        static bool IsFinite(float v) { return !float.IsNaN(v) && !float.IsInfinity(v); }
 
         TasCheckpoint CaptureCheckpoint()
         {
@@ -338,7 +360,11 @@ namespace Tas
             }
             c.camPitch = playerCam != null ? playerCam.rotation.eulerAngles.x : 0f;
             c.speed = speed;
-            c.stateHash = liveHash;
+            c.stateHash = TasInputFrame.StateHash(liveHash, c.Position);
+            // StateHash, not liveHash: a checkpoint is the only place where the sim state is allowed to
+            // enter the hash, and playback rebuilds it from the same two ingredients (input prefix +
+            // position at the same point of the same tick), which is what makes the comparison mean
+            // something after a rollback instead of firing on every tick.
             return c;
         }
 
@@ -384,9 +410,7 @@ namespace Tas
             liveHash = hashAtCut;
             for (int k = 0; k < tail.Count; k++)
             {
-                TasInputFrame f = tail[k];
-                liveHash = TasRng.Mix(liveHash, f.buttons);
-                liveHash = TasRng.Mix(liveHash, f.lookX);
+                liveHash = tail[k].Fold(liveHash);
             }
             TasSim.Accumulator = liveHash;
             return true;

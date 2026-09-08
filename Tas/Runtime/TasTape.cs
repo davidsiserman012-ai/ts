@@ -138,16 +138,7 @@ namespace Tas
         public static uint FramesHash(List<TasInputFrame> frames)
         {
             uint h = 2166136261u;
-            for (int k = 0; k < frames.Count; k++)
-            {
-                TasInputFrame f = frames[k];
-                h = TasRng.Mix(h, (int)f.buttons);
-                h = TasRng.Mix(h, (int)((f.moveX << 16) | (f.moveY & 0xFFFF)));
-                h = TasRng.Mix(h, f.lookX);
-                h = TasRng.Mix(h, f.lookY);
-                h = TasRng.Mix(h, (int)((f.aimX << 16) | (f.aimY & 0xFFFF)));
-                h = TasRng.Mix(h, (int)f.weaponSlot | ((int)f.flags << 8));
-            }
+            for (int k = 0; k < frames.Count; k++) h = frames[k].Fold(h);   // TasInputFrame.Fold: the ONE fold
             return h;
         }
 
