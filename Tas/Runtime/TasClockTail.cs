@@ -30,5 +30,18 @@ namespace Tas
             c.tailDue = false;
             c.Tail();
         }
+
+        /// <summary>
+        /// The tick's capture runs here, after every gameplay Update has consumed this tick's input.
+        /// Loop because a frame may carry more than one tick if Unity decided to run several
+        /// FixedUpdates - with enforceFixedRate (Time.captureFramerate) there is exactly one of each,
+        /// which is one of the reasons that flag exists.
+        /// </summary>
+        void LateUpdate()
+        {
+            TasClock c = TasClock.i;
+            if (c == null || c.manual) return;
+            c.RunCaptures();
+        }
     }
 }

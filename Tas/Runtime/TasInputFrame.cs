@@ -24,6 +24,16 @@ namespace Tas
         FirePressed= 1u << 14,
         AimDown    = 1u << 15,
         Buy        = 1u << 16,
+
+        // Your InputData has no axis for movement: KeyboardSupport/PointerDown set six booleans and
+        // CalculateDirection() turns them into input.direction. Those six ARE the movement input on
+        // PC, so they belong in the tape as held bits (edge events would be lost - see the tap note).
+        DirLeft    = 1u << 17,
+        DirRight   = 1u << 18,
+        DirFwd     = 1u << 19,
+        DirBck     = 1u << 20,
+        DirUp      = 1u << 21,
+        DirDown    = 1u << 22,
     }
 
     /// <summary>

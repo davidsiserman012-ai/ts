@@ -132,7 +132,10 @@ Fixed-point, because float text is where runs go to die: movement axes as `short
 look deltas as `int` at ×1000, aim pointer as normalized `ushort` (so `screenWidth/Height`
 disappear from the format entirely — a 2432×1080 run replays on a 1080×1920 device).
 
-**Your integration point is 2 lines.** `UnityStandardAssets.Characters.FirstPerson
+**Your integration point, as it turns out, was already there** — see
+[`TasGameManagerIntegration.md`](TasGameManagerIntegration.md) §1 for the `InputManager.GetInputData()`
+version and the `OnTickCapture` timing fix. The general rule, kept below because it is the rule:
+ `UnityStandardAssets.Characters.FirstPerson
 .RigidbodyFirstPersonController` reads input in exactly two places:
 
 ```diff
@@ -301,6 +304,7 @@ Tas/Runtime/TasSnapshot.cs     savestates, keyframes, sidecar persistence
 Tas/Runtime/TasDemoExport.cs   DemoData-compatible JSON, gzip wire format, upload payload
 Tas/Runtime/TasOverlay.cs      HUD: tick clock, input display, desync readout (keys live in TasTool)
 Tas/Editor/TasToolWindow.cs    Window ▸ TAS Tool: transport, input grid editor, verify, export
+Integration/*.cs               game-side bridge: InputManager seam, run-state snapshots, persistence gate
 ```
 `Tas/Runtime` and `Tas/Editor` are separate asmdefs so `UnityEditor` never reaches a player
 build, and the recorder keeps **no** compile-time reference to your game types (delegates, not

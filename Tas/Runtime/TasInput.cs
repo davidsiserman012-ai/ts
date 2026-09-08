@@ -80,6 +80,17 @@ namespace Tas
             }
         }
 
+        /// <summary>
+        /// Re-read the device (or the game's own input struct) right now. Used by the recorder at the
+        /// capture point, because TasInput.Current was committed at tick head - before the sim had
+        /// consumed anything - and would therefore store a one-tick-stale frame.
+        /// </summary>
+        public static TasInputFrame SampleLiveNow()
+        {
+            if (LiveReader == null) return Current;
+            return LiveReader();
+        }
+
         // ---- convenience readers for patched gameplay code ----------------
         public static bool GetButton(TasButton b) { return Current.Has(b); }
         public static bool GetButtonDown(TasButton b) { return Current.Has(b) && !Previous.Has(b); }

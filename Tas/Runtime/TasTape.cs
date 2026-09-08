@@ -57,6 +57,7 @@ namespace Tas
         public int finishTick = -1;         // where the level actually completed; tape may run past it
         public string finishReason;         // "level" | "death" | "maxTicks" | "manual"
         public int gameRunSeconds;          // GameManager's TimeManager.Seconds, for cross-checking
+        public float screenInch;            // InputManager.screenInch: scales touch movement, so it is part of the run
         public double runSeconds;
     }
 
@@ -119,7 +120,7 @@ namespace Tas
             w.Write(h.flagId); w.Write(h.avatarId); w.Write(h.knifeId);
             w.Write(h.capeId); w.Write(h.gloveId); w.Write(h.effectId);
             w.Write(h.rankIdx); w.Write(h.controlType);
-            w.Write(h.finishTick); w.Write(h.gameRunSeconds);
+            w.Write(h.finishTick); w.Write(h.gameRunSeconds); w.Write(h.screenInch);
             WriteStr(w, h.finishReason);
             w.Write(h.runSeconds);
 
@@ -185,6 +186,7 @@ namespace Tas
             if (!legacy)
             {
                 h.finishTick = r.ReadInt32(); h.gameRunSeconds = r.ReadInt32();
+                h.screenInch = r.ReadSingle();
                 h.finishReason = ReadStr(r);
             }
             h.runSeconds = r.ReadDouble();

@@ -258,11 +258,22 @@ namespace Tas
             return null;
         }
 
+        TasTape lastTape;
+
+        public TasTape LastTape { get { return lastTape; } }
+
         public void LoadTape(TasTape t)
         {
+            lastTape = t;
             recorder.LoadIntoTrunk(t);
             playback.Load(t);
             dirtyRun = false;
+        }
+
+        /// <summary>Hand the platform's own value back when the tape lets go.</summary>
+        public void RestoreScreenInch()
+        {
+            if (TasRecorder.ScreenInchPin != null) TasRecorder.ScreenInchPin(0f);
         }
 
         public void SaveRun()

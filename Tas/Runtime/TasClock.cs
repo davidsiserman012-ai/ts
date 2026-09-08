@@ -62,7 +62,8 @@ namespace Tas
         public double simTime;                   // == tick * (1/tickRate)
 
         public event Action OnTickHead;          // playback pushes the tape frame here
-        public event Action OnTickTail;          // recorder captures + checksums here
+        public event Action OnTickTail;          // clock-level bookkeeping (input latching)
+        public event Action OnTickCapture;       // recorder + playback sample state HERE, see below
         public event Action<float> OnSimTick;     // sim bus, Manual only
 
         public static float TickDelta { get; private set; }
@@ -238,6 +239,29 @@ namespace Tas
             CancelledFrame = false;
         }
 
+        /// <summary>
+        /// CAPTURE POINT. Your game writes input in InputManager.Update() and consumes it in
+        /// RigidbodyFirstPersonController.Update() - inside the SAME Update batch, with no tick
+        /// boundary between them. So sampling at the tick tail (a FixedUpdate callback, which runs
+        /// BEFORE that Update batch) reads last frame's value: the tape ends up shifted one tick
+        /// against the physics, i.e. every replayed input is applied one frame later than it was
+        /// during recording. Constant, so it never explodes - it just quietly never matches, and a
+        /// 1-tick error on a fast strafe is already past any correction tolerance.
+        /// Capture therefore happens in LateUpdate of the frame whose tick it is: after the sim
+        /// consumed the input, before the frame is drawn.
+        /// </summary>
+        internal int capturePending;
+
+        internal void RunCaptures()
+        {
+            while (capturePending > 0)
+            {
+                capturePending--;
+                try { OnTickCapture.Invoke(); }
+                catch (Exception e) { Debug.LogError("TasClock OnTickCapture: " + e); }
+            }
+        }
+
         void Head()
         {
             tick++;
@@ -251,6 +275,7 @@ namespace Tas
             TasInput.Commit();
 
             tailDue = true;
+            if (!manual) capturePending++;      // drained in LateUpdate, after the sim consumed input
         }
 
         public void Tail()
@@ -258,6 +283,12 @@ namespace Tas
             try { OnTickTail.Invoke(); }
             catch (Exception e) { Debug.LogError("TasClock OnTickTail: " + e); }
             TasInput.Latch();
+        }
+
+        public void Capture()
+        {
+            try { OnTickCapture.Invoke(); }
+            catch (Exception e) { Debug.LogError("TasClock OnTickCapture: " + e); }
         }
 
         /// <summary>One full tick in Manual mode: head, bus, physics, tail.</summary>
@@ -270,6 +301,7 @@ namespace Tas
             TasPhysics.Step(TickDelta);
 
             Tail();
+            Capture();          // Manual mode has no Update batch, so the tail IS the capture point
         }
 
         public static double TicksToSeconds(double t) { return t * TickDelta; }

@@ -28,6 +28,16 @@ namespace Tas
         /// <summary>Wire these where you already call DemoRecorder, or leave them null.</summary>
         public static System.Func<bool> RaceModeProbe;
         public static System.Func<uint> ExtraConfigProbe;   // game-side: control type, gravity, boosts...
+
+        /// <summary>
+        /// Game-side hooks for values that change what a tick MEANS but that this assembly must not
+        /// know about. InputManager.screenInch is one: your touch movement is
+        /// screenInch * (delta/Screen.width) * 3, so the same swipe means a different speed on a
+        /// different display. Record it, hash it, and pin it during replay so a run made on your dev
+        /// machine verifies anywhere.
+        /// </summary>
+        public static System.Func<float> ScreenInchProbe;
+        public static System.Action<float> ScreenInchPin;   // 0f => restore whatever the platform says
         public System.Func<int> SpeedReader;          // () => (int)fpsChar.speed
 
         [Header("Refs (auto-found if null)")]
@@ -100,12 +110,12 @@ namespace Tas
 
         void OnEnable()
         {
-            if (TasClock.Exists) TasClock.i.OnTickTail += OnTail;
+            if (TasClock.Exists) TasClock.i.OnTickCapture += OnCapture;
         }
 
         void OnDisable()
         {
-            if (TasClock.Exists) TasClock.i.OnTickTail -= OnTail;
+            if (TasClock.Exists) TasClock.i.OnTickCapture -= OnCapture;
         }
 
         // ------------------------------------------------------------------ config / identity
@@ -122,6 +132,7 @@ namespace Tas
             // h.rankStr = GameManagerHelpers.RankBelirle();
             // h.rankIdx = GameManagerHelpers.RankIndexBul(h.rankStr);
             h.gameVersion = Application.version;
+            h.screenInch = ScreenInchProbe != null ? ScreenInchProbe() : 0f;
             h.mapHash = TasTape.HashOf(h.mapname);
             h.configHash = ComputeConfigHash();
         }
@@ -140,6 +151,9 @@ namespace Tas
             h = TasRng.Mix(h, Screen.width);
             h = TasRng.Mix(h, Application.version.GetHashCode());
             h = TasRng.Mix(h, Mathf.RoundToInt(TasLiveInput.lookSensitivity * 10000f));
+            h = TasRng.Mix(h, Mathf.RoundToInt((ScreenInchProbe != null ? ScreenInchProbe() : 0f) * 10000f));
+            h = TasRng.Mix(h, Screen.height);
+            h = TasRng.Mix(h, Mathf.RoundToInt(Screen.dpi * 10f));
             if (ExtraConfigProbe != null) h = TasRng.Mix(h, unchecked((int)ExtraConfigProbe()));
             return h;
         }
@@ -262,7 +276,7 @@ namespace Tas
 
         // ------------------------------------------------------------------ per-tick
 
-        void OnTail()
+        void OnCapture()
         {
             if (!recording) return;
 
@@ -277,7 +291,9 @@ namespace Tas
                 return;
             }
 
-            TasInputFrame f = TasInput.Current;
+            // Fresh read at the capture point, not TasInput.Current (that was committed at tick head,
+            // before your controller consumed this frame's input). See TasClock.RunCaptures.
+            TasInputFrame f = TasInput.SampleLiveNow();
             if (frames.Count > 0)
             {
                 TasInputFrame p = frames[frames.Count - 1];

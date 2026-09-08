@@ -6,6 +6,13 @@ toolchain in this sandbox — so expect small signature fixes against your Unity
 
 ## Quickstart (3 steps, no scene edits)
 
+> If you are on the game codebase that has `GameManager`/`InputManager`, step 2 is already done for
+> you: `Integration/TasGameBridge.cs` + `TasInputAdapter.cs` + `TasUnityBridge.cs` + `TasSuspend.cs`
+> subscribe to the events your code already fires (`GameState.gameStarted`, `GameManager.OnOyuncuDustu`,
+> `GameManager.OnLevelCompleted`) and tap input at `InputManager.GetInputData()`. Read
+> [`TasGameManagerIntegration.md`](TasGameManagerIntegration.md) instead of the two lines below.
+
+
 1. Drop `Tas/` in `Assets/`. `TasTool` self-installs via
    `[RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]` and
    `DontDestroyOnLoad`, and creates `TasClock / TasRecorder / TasPlayback / TasOverlay / TasToolUI`
@@ -29,6 +36,8 @@ TasRecorder.i.SpeedReader = () => (int)fpsChar.speed;             // cosmetic, k
 TasTool.RegisterTickDriver(fpsChar, "Update");                    // only needed for >1x turbo
 TasLiveInput.MoveReader  = () => myMoveVector;                    // see "record what the sim ate"
 TasLiveInput.LookReader  = () => myLookDegrees;
+TasRecorder.ScreenInchProbe = () => InputManager.i.screenInch;     // if any scalar scales input
+TasRecorder.ScreenInchPin   = v => InputManager.i.screenInch = v > 0f ? v : platformValue;
 ```
 
 ## Keys
@@ -156,9 +165,15 @@ be. Two safe answers:
 * read the **degrees the controller applied** into `TasLiveInput.LookReader` (default in
   `TasTickDriver`-free setups), or
 * force the controller onto `GetAxisRaw` and record that (also fixes `m_MouseLook` smoothing).
-`TasLiveInput`'s fallback path is the second style; confirm it matches your file before you trust
-a 10-minute run. Same reasoning is why the tape stores **held bits** and derives `JumpPressed` /
+`TasLiveInput`'s fallback path is the second style; confirm it matches your file before you trust a
+10-minute run. Same reasoning is why the tape stores **held bits** and derives `JumpPressed` /
 `FirePressed` from the previous tick, never a `GetKeyDown` moment.
+
+Related, and it is the fix that mattered most in this codebase: **the capture point is `LateUpdate`,
+not the tick tail.** If the game writes input and consumes it in the same `Update` batch (yours does),
+sampling at a `FixedUpdate` tail stores last frame's value while playback pushes this frame's — a
+constant one-tick offset that no amount of tolerance tuning catches because it never diverges. See
+`TasClock.OnTickCapture` / §1a of the integration doc.
 
 ## First-session checklist
 1. `F9`, panel shows `RECORDING from game start`. Play 20 s, `F11`. Console must show

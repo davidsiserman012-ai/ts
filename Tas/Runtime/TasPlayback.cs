@@ -98,7 +98,7 @@ namespace Tas
             if (blockInputWhilePlaying) TasInput.BlockLiveInput = true;
 
             TasClock.i.OnTickHead += OnHead;
-            TasClock.i.OnTickTail += OnTail;
+            TasClock.i.OnTickCapture += OnTail;
             enabled = true;
 
             if (mode == TasPlaybackMode.SpectateState) ShowStateAt(index);
@@ -134,7 +134,7 @@ namespace Tas
             if (TasClock.Exists)
             {
                 TasClock.i.OnTickHead -= OnHead;
-                TasClock.i.OnTickTail -= OnTail;
+                TasClock.i.OnTickCapture -= OnTail;
             }
         }
 
